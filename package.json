@@ -1,0 +1,58 @@
+{
+  "name": "slad-os",
+  "version": "0.1.0",
+  "description": "SLAD OS CLI — explore intent, generate Snapshots, orchestrate agents across multiple LLM providers.",
+  "type": "module",
+  "bin": {
+    "slad": "./bin/slad-os.js",
+    "dev": "./bin/slad-os.js",
+    "dev-agent": "./bin/slad-os.js"
+  },
+  "main": "dist/cli.js",
+  "files": [
+    "bin",
+    "dist",
+    "README.md",
+    "package.json"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist",
+    "prepare": "npm run build",
+    "prepack": "npm run build",
+    "prepublishOnly": "npm run typecheck"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "cli",
+    "agent",
+    "llm",
+    "claude",
+    "openai",
+    "gemini",
+    "slad-os"
+  ],
+  "author": "Christopher Aravena",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.30.0",
+    "@google/generative-ai": "^0.21.0",
+    "@inquirer/prompts": "^8.4.2",
+    "commander": "^12.1.0",
+    "dotenv": "^16.4.5",
+    "kleur": "^4.1.5",
+    "openai": "^4.67.0",
+    "ora": "^8.1.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

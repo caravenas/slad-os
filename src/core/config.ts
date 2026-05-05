@@ -96,5 +96,22 @@ export function resolveProvider(
       process.env.SLAD_CLI_PROMPT_MODE = "arg";
       if (!envValue("CLI_MODEL")) process.env.CLI_MODEL = "sonnet";
       return "cli";
+    case "gemini":
+      process.env.SLAD_CLI_BINARY = "gemini";
+      process.env.SLAD_CLI_ARGS = "";
+      process.env.SLAD_CLI_PROMPT_MODE = "";
+      if (!envValue("CLI_MODEL")) process.env.CLI_MODEL = "";
+      return "cli";
   }
+}
+
+export function parseCliDiscoveryAnswer(answer: string | undefined): string | null {
+  if (!answer) return null;
+  const value = answer.trim();
+  if (!value) return null;
+  if (!value.includes(" | ")) return value;
+
+  const parts = value.split(" | ").map((part) => part.trim()).filter(Boolean);
+  if (parts.length >= 2 && parts[1]) return parts[1];
+  return parts[0] ?? null;
 }

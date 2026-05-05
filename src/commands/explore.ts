@@ -8,9 +8,11 @@ import { EXPLORER_SYSTEM } from "../agents/prompts.js";
 import { ExploreOutput, type ChatMessage } from "../core/types.js";
 import { collectAnswers, formatAnswersForPrompt, printHitlHeader } from "../core/hitl.js";
 import { log } from "../core/logger.js";
+import { SchemaError } from "../core/errors.js";
 import { getActiveSession, appendArtifact, saveSession } from "../core/session.js";
 import { readWikiContextCached } from "../agents/explorer.js";
 import { hashStructured, hashText, readOrCreateReusableValue } from "../cache/reusable.js";
+import { projectContextBlock } from "../core/context.js";
 
 export interface ExploreOpts {
   provider?: string;
@@ -35,8 +37,12 @@ function parseExploreOutput(raw: string): ReturnType<typeof ExploreOutput.parse>
   const parsed = JSON.parse(jsonText);
   const result = ExploreOutput.safeParse(parsed);
   if (!result.success) {
-    const issues = result.error.issues.map((i) => `  ${i.path.join(".")} — ${i.message}`).join("\n");
-    throw new Error(`Explorer output no pasa el schema:\n${issues}\n\nJSON recibido:\n${jsonText}`);
+    throw new SchemaError(
+      "Explorer output no pasa el schema",
+      jsonText,
+      result.error.issues.map((i) => `${i.path.join(".")} — ${i.message}`),
+      "explore",
+    );
   }
   return result.data;
 }
@@ -58,10 +64,12 @@ export async function generateExploreOutput(options: {
     cwd: options.cwd,
     cacheRootDir: options.cacheRootDir,
   });
+  const projectCtx = projectContextBlock(options.cwd);
   const userContent = [
     wikiContext.text ? `Contexto de la wiki del usuario (solo referencia):\n\n${wikiContext.text}\n\n---\n` : "",
+    projectCtx,
     `Intención del usuario:\n${options.intent}`,
-  ].join("");
+  ].filter(Boolean).join("\n\n");
 
   const result = await readOrCreateReusableValue({
     cwd: options.cwd,

@@ -6,6 +6,7 @@ import { getProvider } from "../models/index.js";
 import { ExploreOutput, SnapshotOutput, type ChatMessage } from "../core/types.js";
 import { SNAPSHOT_SYSTEM } from "../agents/prompts.js";
 import { collectAnswers, formatAnswersForPrompt, printHitlHeader } from "../core/hitl.js";
+import { projectContextBlock } from "../core/context.js";
 import { log } from "../core/logger.js";
 import {
   getActiveSession,
@@ -123,9 +124,13 @@ export async function snapshotCommand(opts: SnapshotOpts): Promise<void> {
   const provider = await getProvider(providerName, apiKey ?? undefined);
 
   const sessionCtx = session ? sessionContextBlock(session) : "";
+  const projectCtx = projectContextBlock();
   let userPayload: { content: string; title: string };
   try {
     userPayload = buildUserContent(opts, sessionCtx);
+    if (projectCtx) {
+      userPayload = { ...userPayload, content: `${projectCtx}\n\n${userPayload.content}` };
+    }
   } catch (err) {
     log.error((err as Error).message);
     process.exit(1);

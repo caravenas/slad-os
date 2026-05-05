@@ -45,7 +45,7 @@ function hasArtifact(session: SessionState | null, kind: string): boolean {
   return session?.artifacts.some((a: { kind: string }) => a.kind === kind) ?? false;
 }
 
-function parseAction(raw: string, session: SessionState | null): ChatAction {
+export function parseAction(raw: string, session: SessionState | null): ChatAction {
   const trimmed = raw.trim();
   const lower = trimmed.toLowerCase();
 
@@ -76,7 +76,7 @@ function parseAction(raw: string, session: SessionState | null): ChatAction {
   return { type: "unknown", input: trimmed };
 }
 
-function suggestNext(session: SessionState | null): string {
+export function suggestNext(session: SessionState | null): string {
   if (!session || !hasArtifact(session, "explore")) {
     return kleur.dim("Escribí tu intención para empezar, o \"help\" para ver comandos.");
   }
@@ -107,7 +107,7 @@ function suggestNext(session: SessionState | null): string {
 
 // ─── safe command wrapper ─────────────────────────────────────────────────────
 
-async function safeCall(fn: () => Promise<void>): Promise<boolean> {
+export async function safeCall(fn: () => Promise<void>): Promise<boolean> {
   const originalExit = process.exit.bind(process);
   let didExit = false;
   (process as NodeJS.Process).exit = ((code?: number | string | null) => {

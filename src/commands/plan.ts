@@ -9,6 +9,7 @@ import { PLANNER_SYSTEM } from "../agents/prompts.js";
 import { collectAnswers, formatAnswersForPrompt, printHitlHeader } from "../core/hitl.js";
 import { log } from "../core/logger.js";
 import { hashStructured, hashText, readOrCreateReusableValue } from "../cache/reusable.js";
+import { projectContextBlock } from "../core/context.js";
 import {
   getActiveSession,
   lastArtifactPath,
@@ -70,9 +71,12 @@ export async function generatePlanOutput(options: {
   cacheStatus: "hit" | "miss";
   userContent: string;
 }> {
-  const userContent = options.sessionContext
-    ? `Snapshot:\n\n${options.snapshotContent}\n\n${options.sessionContext}`
-    : `Snapshot:\n\n${options.snapshotContent}`;
+  const projectCtx = projectContextBlock(options.cwd);
+  const userContent = [
+    projectCtx,
+    `Snapshot:\n\n${options.snapshotContent}`,
+    options.sessionContext,
+  ].filter(Boolean).join("\n\n");
 
   const result = await readOrCreateReusableValue({
     cwd: options.cwd,

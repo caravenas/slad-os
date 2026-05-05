@@ -8,7 +8,13 @@ import { getApiKey, getModel, loadConfig, resolveProvider } from "../core/config
 import { PlanOutput, RunOutput, type PlanTask } from "../core/types.js";
 import { select } from "@inquirer/prompts";
 import { collectAnswers, formatAnswersForPrompt, printHitlHeader } from "../core/hitl.js";
+import { projectContextBlock } from "../core/context.js";
 import { log } from "../core/logger.js";
+import { SchemaError, SladError, isRetryable } from "../core/errors.js";
+import { createHarness } from "../harness/index.js";
+import { loadHarnessConfig } from "../harness/config.js";
+import type { ExecutionHarness } from "../harness/types.js";
+import { confirmDangerousAction } from "../harness/approval.js";
 import { getProvider } from "../models/index.js";
 import type { ChatMessage, SessionState } from "../core/types.js";
 import type { ModelProvider } from "../models/index.js";
@@ -33,6 +39,7 @@ export interface RunOpts {
   auto?: boolean;
   maxTasks?: number;
   skipSession?: boolean;
+  harness?: "off" | "on" | "strict";
 }
 
 const DEFAULT_MAX_ROUNDS = 3;
@@ -75,6 +82,7 @@ function buildUserContent(
   sessionCtx: string,
 ): string {
   return [
+    projectContextBlock(),
     `Plan summary:\n${plan.summary}`,
     `Selected task:\n${JSON.stringify(task, null, 2)}`,
     plan.verification.length
@@ -95,11 +103,11 @@ function parseRunOutput(raw: string): RunOutput {
   const parsed = JSON.parse(jsonText);
   const result = RunOutput.safeParse(parsed);
   if (!result.success) {
-    const issues = result.error.issues
-      .map((i) => `  ${i.path.join(".")} — ${i.message}`)
-      .join("\n");
-    throw new Error(
-      `Run output no pasa el schema:\n${issues}\n\nJSON recibido:\n${jsonText}`,
+    throw new SchemaError(
+      "Run output no pasa el schema",
+      jsonText,
+      result.error.issues.map((i) => `${i.path.join(".")} — ${i.message}`),
+      "run",
     );
   }
   return result.data;
@@ -166,7 +174,35 @@ async function executeTask(
   maxRounds: number,
   sessionCtx: string,
   outputDir: string,
+  harness: ExecutionHarness | null = null,
 ): Promise<TaskResult> {
+  const taskStart = Date.now();
+
+  // ── PRE-TASK: check if task can run ──
+  if (harness) {
+    const verdict = await harness.beforeTask(task, null);
+    if (verdict.action === "deny") {
+      const blockedOutput: RunOutput = {
+        taskId: task.id,
+        status: "blocked",
+        summary: `Harness denied: ${verdict.reason}`,
+        changedFiles: [],
+        verification: [],
+        reviewerNotes: [`Harness denied execution: ${verdict.reason}`],
+        followUps: [],
+        questions: [],
+        humanAnswers: {},
+      };
+      const outPath = `${outputDir}/${timestamp()}-${task.id}.json`;
+      fs.mkdirSync(outputDir, { recursive: true });
+      fs.writeFileSync(outPath, JSON.stringify(blockedOutput, null, 2) + "\n", "utf8");
+      return { output: blockedOutput, outPath, humanAnswers: {} };
+    }
+    if (verdict.action === "modify") {
+      task = { ...task, ...verdict.patch };
+    }
+  }
+
   const messages: ChatMessage[] = [
     { role: "user", content: buildUserContent(plan, task, sessionCtx) },
   ];
@@ -190,6 +226,11 @@ async function executeTask(
         model,
       });
     } catch (err) {
+      if (isRetryable(err) && rounds < maxRounds) {
+        spinner.text = `${task.id} · rate limited, reintentando en 5s...`;
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
       spinner.fail(`${task.id} · falló la llamada al provider`);
       throw err;
     }
@@ -233,6 +274,27 @@ async function executeTask(
   }
 
   output = { ...output, humanAnswers: allHumanAnswers };
+
+  // ── POST-OUTPUT: classify + approval ──
+  if (harness && output.status !== "blocked") {
+    const classifications = harness.classifyOutput(output);
+
+    if (harness.requiresApproval(classifications)) {
+      const approved = await confirmDangerousAction(task.id, classifications);
+      if (!approved) {
+        output = {
+          ...output,
+          status: "blocked",
+          reviewerNotes: [
+            ...output.reviewerNotes,
+            "Harness: acción peligrosa rechazada por el usuario",
+          ],
+        };
+      }
+    }
+
+    await harness.afterTask(task, output, Date.now() - taskStart);
+  }
 
   const outPath = path.join(outputDir, `${timestamp()}-${task.id}.json`);
   fs.mkdirSync(outputDir, { recursive: true });
@@ -319,6 +381,7 @@ async function runAutoLoop(
   model: string,
   opts: RunOpts,
   session: SessionState | null,
+  harness: ExecutionHarness | null = null,
 ): Promise<void> {
   const { tasks } = plan;
   const maxRounds = opts.maxRounds ?? DEFAULT_MAX_ROUNDS;
@@ -400,16 +463,22 @@ async function runAutoLoop(
         maxRounds,
         sessionCtx,
         path.join(process.cwd(), "runs"),
+        harness,
       );
     } catch (err) {
-      log.error(`Error ejecutando ${task.id}: ${(err as Error).message}`);
+      if (err instanceof SladError) {
+        log.error(`Error ejecutando ${task.id}: ${err.message}`, err);
+        log.debug("Error context", err.context);
+      } else {
+        log.error(`Error ejecutando ${task.id}: ${(err as Error).message}`);
+      }
       printNewChanges(gitBefore, task.id);
       state.set(task.id, "failed");
       taskReports.push({ taskId: task.id, title: task.title, status: "failed", durationMs: Date.now() - taskStart });
       executions++;
-      const action = await askFailAction(task.id, "failed");
-      if (action === "abort") break;
-      if (action === "skip") {
+      const exceptionAction = await askFailAction(task.id, "failed");
+      if (exceptionAction === "abort") break;
+      if (exceptionAction === "skip") {
         const cascaded = autoSkipDependents(tasks, state, task.id);
         if (cascaded.length) log.dim(`  Auto-skip dependientes: ${cascaded.join(", ")}`);
       }
@@ -438,7 +507,37 @@ async function runAutoLoop(
       state.set(task.id, output.status === "failed" ? "failed" : "failed");
       taskReports.push({ taskId: task.id, title: task.title, status: "failed", durationMs, output });
 
-      const action = await askFailAction(task.id, output.status);
+      let action = await askFailAction(task.id, output.status, output);
+
+      if (action === "followup") {
+        const fuText = await selectFollowUp(output.followUps);
+        const fuTask = buildFollowUpTask(fuText, task, plan);
+        console.log(kleur.dim(`\n  Ejecutando follow-up como ${fuTask.id}: ${fuTask.title}`));
+        const fuSessionCtx = currentSession ? sessionContextBlock(currentSession) : "";
+        try {
+          const fuResult = await executeTask(
+            fuTask,
+            plan,
+            provider,
+            model,
+            maxRounds,
+            fuSessionCtx,
+            path.join(process.cwd(), "runs"),
+            harness,
+          );
+          if (currentSession) {
+            const updated = appendArtifact(currentSession, "run", fuResult.outPath, fuTask.id);
+            saveSession(updated);
+            currentSession = updated;
+          }
+          log.success(`Follow-up ${fuTask.id} completado. JSON guardado en ${fuResult.outPath}`);
+        } catch (err) {
+          log.error(`Follow-up ${fuTask.id} falló: ${(err as Error).message}`);
+        }
+        // Re-ask without the followup option (para no entrar en loop infinito)
+        action = await askFailAction(task.id, output.status);
+      }
+
       if (action === "retry") {
         state.set(task.id, "pending");
         taskReports.pop();
@@ -500,19 +599,68 @@ async function runAutoLoop(
   }
 }
 
+type FailAction = "retry" | "skip" | "abort" | "followup";
+
 async function askFailAction(
   taskId: string,
   status: string,
-): Promise<"retry" | "skip" | "abort"> {
+  output?: RunOutput,
+): Promise<FailAction> {
   console.log("");
+  type Choice = { name: string; value: FailAction };
+  const choices: Choice[] = [
+    { name: "Saltar esta tarea (y sus dependientes)", value: "skip" },
+    { name: "Reintentar", value: "retry" },
+    { name: "Abortar el loop", value: "abort" },
+  ];
+  if (output?.followUps.length) {
+    choices.unshift({
+      name: `Ejecutar un follow-up (${output.followUps.length} disponible${output.followUps.length > 1 ? "s" : ""})`,
+      value: "followup",
+    });
+  }
   return select({
     message: `Tarea ${taskId} → ${kleur.red(status)}. ¿Qué hacemos?`,
-    choices: [
-      { name: "Saltar esta tarea (y sus dependientes)", value: "skip" as const },
-      { name: "Reintentar", value: "retry" as const },
-      { name: "Abortar el loop", value: "abort" as const },
-    ],
+    choices,
   });
+}
+
+async function selectFollowUp(followUps: string[]): Promise<string> {
+  return select({
+    message: "Seleccioná el follow-up a ejecutar:",
+    choices: followUps.map((fu, i) => ({
+      name: fu,
+      value: fu,
+      short: `FU${i + 1}`,
+    })),
+  });
+}
+
+function generateFollowUpTaskId(plan: ReturnType<typeof PlanOutput.parse>): string {
+  const nums = plan.tasks
+    .map((t) => parseInt(t.id.slice(1)))
+    .filter((n) => !isNaN(n));
+  const max = nums.length > 0 ? Math.max(...nums) : 0;
+  return `T${max + 1}`;
+}
+
+function buildFollowUpTask(
+  followUpText: string,
+  parentTask: PlanTask,
+  plan: ReturnType<typeof PlanOutput.parse>,
+): PlanTask {
+  const title =
+    followUpText.length > 80 ? followUpText.slice(0, 77) + "..." : followUpText;
+  return {
+    id: generateFollowUpTaskId(plan),
+    title,
+    description: `Follow-up de ${parentTask.id}: ${followUpText}`,
+    type: "implementation",
+    priority: "high",
+    dependsOn: [],
+    files: parentTask.files,
+    acceptanceCriteria: [followUpText],
+  };
 }
 
 function printAutoSummary(
@@ -587,8 +735,23 @@ export async function runCommand(opts: RunOpts): Promise<void> {
 
   log.title(`Run · ${providerName}${model ? ` · ${model}` : ""}`);
 
+  // ── Initialize harness if enabled ──
+  const harnessMode = opts.harness ?? "off";
+  const harness =
+    harnessMode !== "off"
+      ? await createHarness(loadHarnessConfig(harnessMode))
+      : null;
+
+  if (harness) {
+    log.dim(`  harness: ${harnessMode}`);
+  }
+
   if (opts.auto) {
-    await runAutoLoop(plan, provider, model, opts, session);
+    try {
+      await runAutoLoop(plan, provider, model, opts, session, harness);
+    } finally {
+      await harness?.flush();
+    }
     return;
   }
 
@@ -614,16 +777,18 @@ export async function runCommand(opts: RunOpts): Promise<void> {
       opts.maxRounds ?? DEFAULT_MAX_ROUNDS,
       sessionCtx,
       path.join(process.cwd(), "runs"),
+      harness,
     );
   } catch (err) {
     printNewChanges(gitBefore, task.id);
     log.error((err as Error).message);
+    await harness?.flush(); // flush before exit since finally won't run after process.exit
     process.exit(1);
   }
 
   printNewChanges(gitBefore, task.id);
 
-  const { output, outPath, humanAnswers } = result;
+  let { output, outPath, humanAnswers } = result;
 
   if (opts.json && !opts.output) {
     console.log(JSON.stringify(output, null, 2));
@@ -639,12 +804,60 @@ export async function runCommand(opts: RunOpts): Promise<void> {
   }
   log.success(`JSON guardado en ${finalPath}`);
 
-  if (session) {
-    let updated = appendArtifact(session, "run", finalPath, task.id);
+  let currentSession = session;
+  if (currentSession) {
+    let updated = appendArtifact(currentSession, "run", finalPath, task.id);
     if (Object.keys(humanAnswers).length > 0) {
       updated = appendAnswers(updated, task.id, humanAnswers);
     }
     saveSession(updated);
-    log.dim(`  sesión: ${session.id}`);
+    currentSession = updated;
+    log.dim(`  sesión: ${currentSession.id}`);
   }
+
+  // ── Follow-up execution (single-task mode) ──
+  if (!opts.json && output.followUps.length > 0) {
+    let keepRunning = true;
+    while (keepRunning) {
+      const fuText = await selectFollowUp([
+        ...output.followUps,
+        kleur.dim("─ Salir"),
+      ]);
+      if (fuText === kleur.dim("─ Salir")) break;
+
+      const fuTask = buildFollowUpTask(fuText, task, plan);
+      console.log(kleur.dim(`\n  Ejecutando follow-up como ${fuTask.id}: ${fuTask.title}`));
+      const fuSessionCtx = currentSession ? sessionContextBlock(currentSession) : "";
+      try {
+        const fuResult = await executeTask(
+          fuTask,
+          plan,
+          provider,
+          model,
+          opts.maxRounds ?? DEFAULT_MAX_ROUNDS,
+          fuSessionCtx,
+          path.join(process.cwd(), "runs"),
+          harness,
+        );
+        if (currentSession) {
+          const updated = appendArtifact(currentSession, "run", fuResult.outPath, fuTask.id);
+          saveSession(updated);
+          currentSession = updated;
+        }
+        printSingleResult(fuResult.output, fuResult.humanAnswers);
+        log.success(`Follow-up ${fuTask.id} guardado en ${fuResult.outPath}`);
+        // Si el follow-up tuvo sus propios follow-ups, ofrecerlos también
+        if (fuResult.output.followUps.length > 0) {
+          output = { ...fuResult.output };
+        } else {
+          keepRunning = false;
+        }
+      } catch (err) {
+        log.error(`Follow-up ${fuTask.id} falló: ${(err as Error).message}`);
+        keepRunning = false;
+      }
+    }
+  }
+
+  await harness?.flush();
 }

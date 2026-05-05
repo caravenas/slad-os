@@ -6,6 +6,7 @@ import { LEARN_SYSTEM } from "../agents/prompts.js";
 import { getApiKey, getModel, loadConfig, resolveProvider } from "../core/config.js";
 import { LearnOutput, RunOutput, type ChatMessage } from "../core/types.js";
 import { collectAnswers, formatAnswersForPrompt, printHitlHeader } from "../core/hitl.js";
+import { projectContextBlock } from "../core/context.js";
 import { log } from "../core/logger.js";
 import { getProvider } from "../models/index.js";
 import {
@@ -127,6 +128,7 @@ export async function learnCommand(opts: LearnOpts): Promise<void> {
 
   const sessionCtx = session ? sessionContextBlock(session) : "";
   const userContent = [
+    projectContextBlock(),
     `Source run path:\n${run.source}`,
     `Run report:\n${JSON.stringify(run.content, null, 2)}`,
     sessionCtx,

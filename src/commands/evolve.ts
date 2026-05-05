@@ -6,6 +6,7 @@ import { EVOLVE_SYSTEM } from "../agents/prompts.js";
 import { getApiKey, getModel, loadConfig, resolveProvider } from "../core/config.js";
 import { EvolveOutput, type ChatMessage } from "../core/types.js";
 import { collectAnswers, formatAnswersForPrompt, printHitlHeader } from "../core/hitl.js";
+import { projectContextBlock } from "../core/context.js";
 import { log } from "../core/logger.js";
 import { getProvider } from "../models/index.js";
 import { getActiveSession, appendArtifact, saveSession, sessionContextBlock } from "../core/session.js";
@@ -127,7 +128,9 @@ export async function evolveCommand(opts: EvolveOpts): Promise<void> {
   log.title(`Evolve · ${providerName}${model ? ` · ${model}` : ""}`);
 
   const sessionCtx = session ? sessionContextBlock(session) : "";
-  const context = sessionCtx ? `${buildContext()}\n\n====\n\n${sessionCtx}` : buildContext();
+  const context = [projectContextBlock(), buildContext(), sessionCtx]
+    .filter(Boolean)
+    .join("\n\n====\n\n");
 
   const messages: ChatMessage[] = [{ role: "user", content: context }];
   const maxRounds = 3;

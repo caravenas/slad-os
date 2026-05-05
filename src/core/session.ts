@@ -82,6 +82,10 @@ export function getActiveSession(cwd = process.cwd()): SessionState | null {
   return loadSession(id, cwd);
 }
 
+export function hasPersistedActiveSession(cwd = process.cwd()): boolean {
+  return getActiveSession(cwd) !== null;
+}
+
 export function listSessions(cwd = process.cwd()): SessionState[] {
   const root = sessionsRoot(cwd);
   if (!fs.existsSync(root)) return [];
@@ -114,6 +118,28 @@ export function appendArtifact(
   };
 }
 
+export function upsertArtifact(
+  session: SessionState,
+  kind: SessionArtifactKind,
+  filePath: string,
+  taskId?: string,
+): SessionState {
+  const filtered = session.artifacts.filter((artifact) => artifact.kind !== kind);
+  return {
+    ...session,
+    currentPhase: kind,
+    artifacts: [
+      ...filtered,
+      {
+        kind,
+        path: filePath,
+        createdAt: new Date().toISOString(),
+        ...(taskId ? { taskId } : {}),
+      },
+    ],
+  };
+}
+
 export function appendAnswers(
   session: SessionState,
   taskId: string,
@@ -126,6 +152,24 @@ export function appendAnswers(
     askedAt: new Date().toISOString(),
   }));
   return { ...session, humanAnswers: [...session.humanAnswers, ...newAnswers] };
+}
+
+export function upsertAnswers(
+  session: SessionState,
+  taskId: string,
+  answers: Record<string, string>,
+): SessionState {
+  const existing = session.humanAnswers.filter((a) => {
+    if (a.taskId !== taskId) return true;
+    return !(a.questionId in answers);
+  });
+  const newAnswers: SessionAnswer[] = Object.entries(answers).map(([questionId, answer]) => ({
+    taskId,
+    questionId,
+    answer,
+    askedAt: new Date().toISOString(),
+  }));
+  return { ...session, humanAnswers: [...existing, ...newAnswers] };
 }
 
 export function lastArtifactPath(

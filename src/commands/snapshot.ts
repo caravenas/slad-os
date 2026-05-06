@@ -46,6 +46,60 @@ function extractJson(raw: string): string {
   return body.slice(first, last + 1).trim();
 }
 
+// ─── Pure generator (sin UI) ──────────────────────────────────────────────────
+
+export interface GenerateSnapshotOpts {
+  /** ExploreOutput completo (output del stage anterior) */
+  exploreOutput: ReturnType<typeof ExploreOutput.parse>;
+  /** Nombre (o substring) del approach a usar. Si undefined, usa el primero. */
+  approach?: string;
+  provider: Awaited<ReturnType<typeof getProvider>>;
+  model?: string;
+  cwd?: string;
+  /** Token usage callback */
+  onUsage?: (inputTokens: number, outputTokens: number) => void;
+}
+
+/**
+ * Genera un SnapshotOutput a partir de un ExploreOutput.
+ * Función pura: sin spinners ni console.log, sin HITL interactivo.
+ * Si el LLM retorna awaiting_human, retorna el output tal cual (el caller decide).
+ */
+export async function generateSnapshotOutput(opts: GenerateSnapshotOpts): Promise<ReturnType<typeof SnapshotOutput.parse>> {
+  const exp = opts.exploreOutput;
+  const chosen = opts.approach
+    ? exp.approaches.find((a) => a.name.toLowerCase().includes(opts.approach!.toLowerCase()))
+    : exp.approaches[0];
+
+  const projectCtx = projectContextBlock(opts.cwd);
+
+  const parts = [
+    projectCtx,
+    `Intent original:\n${exp.intent}`,
+    `Reframing:\n${exp.reframing}`,
+    chosen
+      ? `Enfoque elegido — ${chosen.name}:\n${chosen.summary}\nPros: ${chosen.pros.join("; ")}\nCons: ${chosen.cons.join("; ")}`
+      : "",
+    exp.risks.length ? `Riesgos conocidos:\n- ${exp.risks.join("\n- ")}` : "",
+    exp.openQuestions.length ? `Preguntas abiertas:\n- ${exp.openQuestions.join("\n- ")}` : "",
+    `Next step sugerido: ${exp.recommendedNext}`,
+  ].filter(Boolean).join("\n\n");
+
+  const raw = await opts.provider.complete(
+    [{ role: "user", content: parts }],
+    {
+      systemPrompt: SNAPSHOT_SYSTEM,
+      temperature: 0.3,
+      maxTokens: 1500,
+      model: opts.model,
+      onUsage: opts.onUsage,
+    },
+  );
+
+  return parseSnapshotOutput(raw);
+}
+
+
 function parseSnapshotOutput(raw: string): ReturnType<typeof SnapshotOutput.parse> {
   const jsonText = extractJson(raw);
   const parsed = JSON.parse(jsonText);

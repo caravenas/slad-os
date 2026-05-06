@@ -173,6 +173,27 @@ Cuando uses "awaiting_human", cada question debe tener:
 - "context": una línea de por qué preguntás esto (opcional pero útil)
 - "blocking": true si sin la respuesta no podés continuar (default true)
 
+## Herramientas disponibles
+
+Cuando el sistema lo soporte, tenés acceso a herramientas para implementar directamente:
+- readFile(path): Lee el contenido de un archivo del proyecto
+- writeFile(path, content): Escribe o crea un archivo (crea directorios si no existen)
+- listDir(path, recursive?): Lista contenido de un directorio
+- grep(pattern, glob?): Busca un patrón regex en archivos del proyecto
+- exec(command, timeout?): Ejecuta un comando shell (timeout 30s)
+- gitStatus(): Estado actual del repositorio git
+- gitDiff(file?, staged?): Diff de cambios (sin staged o staged)
+- gitAdd(files): Stagea archivos para commit
+- gitCommit(message): Hace un commit local (no hace push)
+
+Reglas de uso de herramientas:
+- SIEMPRE leé los archivos relevantes con readFile antes de escribir (para no pisar contexto).
+- Escribí solo los archivos que la tarea requiere. No hagas refactors fuera de scope.
+- Ejecutá los comandos de verificación (tsc, npm test) DESPUÉS de escribir para validar.
+- Si un comando falla, intentá corregir antes de reportar "failed".
+- Reportá en "verification[]" todos los comandos que ejecutaste con su resultado real.
+- Si no tenés herramientas disponibles, describí qué harías (modo advisory).
+
 Debes responder EXCLUSIVAMENTE con un objeto JSON válido con este shape:
 
 {

@@ -7,6 +7,8 @@ import { BUILDER_REVIEWER_SYSTEM } from "../agents/prompts.js";
 import { getApiKey, getModel, loadConfig, resolveProvider } from "../core/config.js";
 import { PlanOutput, RunOutput, type PlanTask } from "../core/types.js";
 import { select } from "@inquirer/prompts";
+import type { Scratchpad } from "../context/scratchpad.js";
+import type { BudgetTracker } from "../context/budget.js";
 import { collectAnswers, formatAnswersForPrompt, printHitlHeader } from "../core/hitl.js";
 import { projectContextBlock } from "../core/context.js";
 import { log } from "../core/logger.js";
@@ -16,6 +18,9 @@ import { loadHarnessConfig } from "../harness/config.js";
 import type { ExecutionHarness } from "../harness/types.js";
 import { confirmDangerousAction } from "../harness/approval.js";
 import { getProvider } from "../models/index.js";
+import { toolLoop } from "../models/tool-loop.js";
+import { ToolExecutor } from "../tools/executor.js";
+import { createDefaultRegistry } from "../tools/registry.js";
 import type { ChatMessage, SessionState } from "../core/types.js";
 import type { ModelProvider } from "../models/index.js";
 import {
@@ -40,6 +45,22 @@ export interface RunOpts {
   maxTasks?: number;
   skipSession?: boolean;
   harness?: "off" | "on" | "strict";
+  /** Habilitar tool use (ejecución real de código). Default: true si el provider lo soporta */
+  tools?: boolean;
+  /**
+   * Modo no-interactivo para uso programático (ej. desde `slad auto`).
+   * Cuando true:
+   * - Tasks fallidas → auto-skip (sin preguntar retry/skip/abort)
+   * - HITL awaiting_human → el loop se detiene retornando false
+   * - No se pregunta resume/fresh al detectar completadas previas
+   */
+  nonInteractive?: boolean;
+  /** Scratchpad para offloading de tool results grandes (usado en auto pipeline) */
+  scratchpad?: Scratchpad | null;
+  /** Budget tracker para visibilidad de costo (usado en auto pipeline) */
+  budget?: BudgetTracker | null;
+  /** Token usage callback (usado en auto pipeline) */
+  onUsage?: (inputTokens: number, outputTokens: number) => void;
 }
 
 const DEFAULT_MAX_ROUNDS = 3;
@@ -166,6 +187,11 @@ interface TaskResult {
   humanAnswers: Record<string, string>;
 }
 
+interface ExecuteTaskExtras {
+  scratchpad?: Scratchpad | null;
+  onUsage?: (inputTokens: number, outputTokens: number) => void;
+}
+
 async function executeTask(
   task: PlanTask,
   plan: ReturnType<typeof PlanOutput.parse>,
@@ -175,6 +201,8 @@ async function executeTask(
   sessionCtx: string,
   outputDir: string,
   harness: ExecutionHarness | null = null,
+  useTools = true,
+  extras: ExecuteTaskExtras = {},
 ): Promise<TaskResult> {
   const taskStart = Date.now();
 
@@ -219,12 +247,37 @@ async function executeTask(
     );
 
     try {
-      raw = await provider.complete(messages, {
-        systemPrompt: BUILDER_REVIEWER_SYSTEM,
-        temperature: 0.2,
-        maxTokens: 3000,
-        model,
-      });
+      const toolsEnabled = useTools && provider.supportsToolUse;
+      if (toolsEnabled) {
+        const registry = createDefaultRegistry();
+        const executor = new ToolExecutor(registry, {
+          cwd: process.cwd(),
+          harness,
+        });
+        raw = await toolLoop(provider, messages, executor, {
+          systemPrompt: BUILDER_REVIEWER_SYSTEM,
+          temperature: 0.2,
+          maxTokens: 4096,
+          model,
+          tools: registry.definitions(),
+          maxToolRounds: 10,
+          scratchpad: extras.scratchpad ?? null,
+          onUsage: extras.onUsage,
+          onToolCall: (name, args) => {
+            const firstArg = Object.values(args)[0];
+            const argPreview = typeof firstArg === "string" ? firstArg.slice(0, 40) : "";
+            spinner.text = `${task.id} · ${name}(${argPreview})`;
+          },
+        });
+      } else {
+        raw = await provider.complete(messages, {
+          systemPrompt: BUILDER_REVIEWER_SYSTEM,
+          temperature: 0.2,
+          maxTokens: 3000,
+          model,
+          onUsage: extras.onUsage,
+        });
+      }
     } catch (err) {
       if (isRetryable(err) && rounds < maxRounds) {
         spinner.text = `${task.id} · rate limited, reintentando en 5s...`;
@@ -375,13 +428,14 @@ function findCompletedTaskIds(session: SessionState | null, tasks: PlanTask[]): 
   return completed;
 }
 
-async function runAutoLoop(
+export async function runAutoLoop(
   plan: ReturnType<typeof PlanOutput.parse>,
   provider: ModelProvider,
   model: string,
   opts: RunOpts,
   session: SessionState | null,
   harness: ExecutionHarness | null = null,
+  useTools = true,
 ): Promise<void> {
   const { tasks } = plan;
   const maxRounds = opts.maxRounds ?? DEFAULT_MAX_ROUNDS;
@@ -402,16 +456,23 @@ async function runAutoLoop(
         `  Tareas ya completadas en esta sesión: ${kleur.cyan(sortedIds.join(", "))}`,
       ),
     );
-    const action = await select({
-      message: "¿Cómo querés seguir?",
-      choices: [
-        { name: "Resumir desde la siguiente pendiente (skip las completadas)", value: "resume" as const },
-        { name: "Empezar de cero (re-ejecutar todo)", value: "fresh" as const },
-      ],
-      default: "resume",
-    });
-    if (action === "resume") {
+
+    if (opts.nonInteractive) {
+      // Auto-resume en modo no-interactivo
+      log.dim("  auto: resumiendo desde la siguiente pendiente");
       for (const id of previouslyDone) state.set(id, "done");
+    } else {
+      const action = await select({
+        message: "¿Cómo querés seguir?",
+        choices: [
+          { name: "Resumir desde la siguiente pendiente (skip las completadas)", value: "resume" as const },
+          { name: "Empezar de cero (re-ejecutar todo)", value: "fresh" as const },
+        ],
+        default: "resume",
+      });
+      if (action === "resume") {
+        for (const id of previouslyDone) state.set(id, "done");
+      }
     }
   }
 
@@ -464,6 +525,8 @@ async function runAutoLoop(
         sessionCtx,
         path.join(process.cwd(), "runs"),
         harness,
+        useTools,
+        { scratchpad: opts.scratchpad, onUsage: opts.onUsage },
       );
     } catch (err) {
       if (err instanceof SladError) {
@@ -476,6 +539,15 @@ async function runAutoLoop(
       state.set(task.id, "failed");
       taskReports.push({ taskId: task.id, title: task.title, status: "failed", durationMs: Date.now() - taskStart });
       executions++;
+
+      if (opts.nonInteractive) {
+        // Auto-skip en modo no-interactivo
+        log.dim(`  auto: skip ${task.id} (error de ejecución)`);
+        const cascaded = autoSkipDependents(tasks, state, task.id);
+        if (cascaded.length) log.dim(`  Auto-skip dependientes: ${cascaded.join(", ")}`);
+        continue;
+      }
+
       const exceptionAction = await askFailAction(task.id, "failed");
       if (exceptionAction === "abort") break;
       if (exceptionAction === "skip") {
@@ -507,6 +579,14 @@ async function runAutoLoop(
       state.set(task.id, output.status === "failed" ? "failed" : "failed");
       taskReports.push({ taskId: task.id, title: task.title, status: "failed", durationMs, output });
 
+      if (opts.nonInteractive) {
+        // Auto-skip en modo no-interactivo: no preguntar retry/skip/abort
+        log.dim(`  auto: skip ${task.id} (${output.status})`);
+        const cascaded = autoSkipDependents(tasks, state, task.id);
+        if (cascaded.length) log.dim(`  Auto-skip dependientes: ${cascaded.join(", ")}`);
+        continue;
+      }
+
       let action = await askFailAction(task.id, output.status, output);
 
       if (action === "followup") {
@@ -524,6 +604,7 @@ async function runAutoLoop(
             fuSessionCtx,
             path.join(process.cwd(), "runs"),
             harness,
+            useTools,
           );
           if (currentSession) {
             const updated = appendArtifact(currentSession, "run", fuResult.outPath, fuTask.id);
@@ -748,7 +829,7 @@ export async function runCommand(opts: RunOpts): Promise<void> {
 
   if (opts.auto) {
     try {
-      await runAutoLoop(plan, provider, model, opts, session, harness);
+      await runAutoLoop(plan, provider, model, opts, session, harness, opts.tools !== false);
     } finally {
       await harness?.flush();
     }
@@ -778,6 +859,7 @@ export async function runCommand(opts: RunOpts): Promise<void> {
       sessionCtx,
       path.join(process.cwd(), "runs"),
       harness,
+      opts.tools !== false,
     );
   } catch (err) {
     printNewChanges(gitBefore, task.id);
@@ -838,6 +920,7 @@ export async function runCommand(opts: RunOpts): Promise<void> {
           fuSessionCtx,
           path.join(process.cwd(), "runs"),
           harness,
+          opts.tools !== false,
         );
         if (currentSession) {
           const updated = appendArtifact(currentSession, "run", fuResult.outPath, fuTask.id);

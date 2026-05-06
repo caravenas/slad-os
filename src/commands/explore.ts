@@ -55,6 +55,8 @@ export async function generateExploreOutput(options: {
   wikiPath?: string;
   cwd?: string;
   cacheRootDir?: string;
+  /** Token usage callback — llamado después de cada API call */
+  onUsage?: (inputTokens: number, outputTokens: number) => void;
 }): Promise<{
   value: ReturnType<typeof ExploreOutput.parse>;
   cacheStatus: "hit" | "miss";
@@ -95,6 +97,7 @@ export async function generateExploreOutput(options: {
           temperature: 0.5,
           maxTokens: 2048,
           model: options.model,
+          onUsage: options.onUsage,
         },
       );
       return parseExploreOutput(raw);

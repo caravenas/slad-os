@@ -66,6 +66,8 @@ export async function generatePlanOutput(options: {
   sessionContext?: string;
   cwd?: string;
   cacheRootDir?: string;
+  /** Token usage callback — llamado después de cada API call */
+  onUsage?: (inputTokens: number, outputTokens: number) => void;
 }): Promise<{
   value: ReturnType<typeof PlanOutput.parse>;
   cacheStatus: "hit" | "miss";
@@ -99,6 +101,7 @@ export async function generatePlanOutput(options: {
         temperature: 0.2,
         maxTokens: 2500,
         model: options.model,
+        onUsage: options.onUsage,
       });
       return parsePlanOutput(raw);
     },

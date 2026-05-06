@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
-import type { ModelProvider } from "./index.js";
+import type { ModelProvider, ToolUseOptions } from "./index.js";
 import type { ChatMessage, CompletionOptions, ProviderName } from "../core/types.js";
+import type { ProviderResponse, ToolCall } from "../tools/types.js";
 import { ProviderError } from "../core/errors.js";
 
 const DEFAULT_MODEL = "MiniMax-M2.7";
@@ -45,11 +46,93 @@ export class AnthropicProvider implements ModelProvider {
       );
     }
 
+    // Report token usage if callback provided
+    opts.onUsage?.(res.usage.input_tokens, res.usage.output_tokens);
+
     // The SDK returns a union of content blocks; we only care about text.
     const text = res.content
       .map((block) => (block.type === "text" ? block.text : ""))
       .join("\n");
 
     return text.trim();
+  }
+
+  async completeWithTools(messages: ChatMessage[], opts: ToolUseOptions): Promise<ProviderResponse> {
+    const systemFromMessages = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
+    const system = opts.systemPrompt ?? systemFromMessages ?? undefined;
+
+    const chat = messages
+      .filter((m) => m.role !== "system")
+      .map((m) => ({
+        role: m.role as "user" | "assistant",
+        content: m.content,
+      }));
+
+    // Convert ToolDefinition[] to Anthropic tools format
+    const tools = opts.tools.map((t) => ({
+      name: t.name,
+      description: t.description,
+      input_schema: {
+        type: "object" as const,
+        properties: Object.fromEntries(
+          t.parameters.map((p) => [
+            p.name,
+            {
+              type: p.type,
+              description: p.description,
+              ...(p.enum ? { enum: p.enum } : {}),
+            },
+          ]),
+        ),
+        required: t.parameters.filter((p) => p.required !== false).map((p) => p.name),
+      },
+    }));
+
+    let res: Awaited<ReturnType<typeof this.client.messages.create>>;
+    try {
+      res = await this.client.messages.create({
+        model: opts.model ?? DEFAULT_MODEL,
+        max_tokens: opts.maxTokens ?? 4096,
+        temperature: opts.temperature ?? 0.2,
+        ...(system ? { system } : {}),
+        messages: chat,
+        tools,
+      });
+    } catch (err: unknown) {
+      const apiErr = err as { status?: number; message?: string };
+      const retryable = apiErr.status === 429 || apiErr.status === 529 || apiErr.status === 500;
+      throw new ProviderError(
+        apiErr.message ?? "Anthropic API error",
+        "anthropic",
+        { statusCode: apiErr.status, retryable, cause: err as Error },
+      );
+    }
+
+    // Report token usage if callback provided
+    opts.onUsage?.(res.usage.input_tokens, res.usage.output_tokens);
+
+    // Parse response: may be text, tool_use, or a mix
+    const toolCalls: ToolCall[] = [];
+    const textParts: string[] = [];
+
+    for (const block of res.content) {
+      if (block.type === "text") textParts.push(block.text);
+      if (block.type === "tool_use") {
+        toolCalls.push({
+          id: block.id,
+          name: block.name,
+          arguments: block.input as Record<string, unknown>,
+        });
+      }
+    }
+
+    if (toolCalls.length > 0) {
+      return { type: "tool_use", toolCalls, textParts };
+    }
+    return { type: "text", content: textParts.join("\n").trim() };
+  }
+
+  get supportsToolUse(): boolean {
+    return true;
   }
 }

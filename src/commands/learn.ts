@@ -40,6 +40,61 @@ function timestamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
+// ─── Pure generator (sin UI) ──────────────────────────────────────────────────
+
+export interface GenerateLearnOpts {
+  /** Path al run report JSON o al directorio de runs (usa el más reciente) */
+  runPath: string;
+  provider: Awaited<ReturnType<typeof getProvider>>;
+  model?: string;
+  cwd?: string;
+  /** Token usage callback */
+  onUsage?: (inputTokens: number, outputTokens: number) => void;
+}
+
+/**
+ * Genera un LearnOutput a partir de un run report.
+ * Función pura: sin spinners ni console.log, sin HITL interactivo.
+ */
+export async function generateLearnOutput(opts: GenerateLearnOpts): Promise<LearnOutput> {
+  // Resolve: si runPath es un directorio, usar el json más reciente
+  let resolvedPath = opts.runPath;
+  if (fs.existsSync(opts.runPath) && fs.statSync(opts.runPath).isDirectory()) {
+    const latest = latestJsonFile(opts.runPath);
+    if (!latest) throw new Error(`No hay run reports en ${opts.runPath}`);
+    resolvedPath = latest;
+  }
+
+  const run = readRun(resolvedPath);
+  const projectCtx = projectContextBlock(opts.cwd);
+
+  const userContent = [
+    projectCtx,
+    `Source run path:\n${run.source}`,
+    `Run report:\n${JSON.stringify(run.content, null, 2)}`,
+  ].filter(Boolean).join("\n\n");
+
+  const raw = await opts.provider.complete(
+    [{ role: "user", content: userContent }],
+    {
+      systemPrompt: LEARN_SYSTEM,
+      temperature: 0.2,
+      maxTokens: 2200,
+      model: opts.model,
+      onUsage: opts.onUsage,
+    },
+  );
+
+  const jsonText = extractJson(raw);
+  const parsed = JSON.parse(jsonText);
+  const result = LearnOutput.safeParse(parsed);
+  if (!result.success) {
+    const issues = result.error.issues.map((i) => `  ${i.path.join(".")} — ${i.message}`).join("\n");
+    throw new Error(`Learn output no pasa el schema:\n${issues}\n\nJSON recibido:\n${jsonText}`);
+  }
+  return result.data;
+}
+
 function latestJsonFile(dir: string): string | null {
   if (!fs.existsSync(dir)) return null;
   const files = fs

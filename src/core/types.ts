@@ -21,7 +21,12 @@ export const CompletionOptions = z.object({
   maxTokens: z.number().int().positive().optional(),
   systemPrompt: z.string().optional(),
 });
-export type CompletionOptions = z.infer<typeof CompletionOptions>;
+// onUsage is a runtime callback — cannot be part of the Zod schema (no functions in Zod)
+// so we extend the inferred type with it manually.
+export type CompletionOptions = z.infer<typeof CompletionOptions> & {
+  /** Called after each provider API call with input/output token counts. */
+  onUsage?: (inputTokens: number, outputTokens: number) => void;
+};
 
 // ─── Question — must be defined before any output schema that references it ───
 

@@ -7,6 +7,7 @@ import { planCommand } from "./commands/plan.js";
 import { runCommand } from "./commands/run.js";
 import { learnCommand } from "./commands/learn.js";
 import { evolveCommand } from "./commands/evolve.js";
+import { autoCommand } from "./commands/auto.js";
 import {
   sessionStartCommand,
   sessionListCommand,
@@ -113,6 +114,8 @@ program
   .option("--json", "Imprimir JSON plano en stdout en lugar del resumen legible")
   .option("--skip-session", "Ignorar sesión activa (comportamiento v0.1.0)")
   .option("--harness <mode>", "Modo del arnés de seguridad (off | on | strict)", "off")
+  .option("--tools", "Habilitar tool use: el agente ejecuta código real (default si el provider lo soporta)")
+  .option("--no-tools", "Deshabilitar tool use: modo advisory (describe qué haría sin ejecutar)")
   .action(async (taskArg: string | undefined, opts) => {
     await runCommand({ ...opts, task: taskArg ?? opts.task });
   });
@@ -143,6 +146,35 @@ program
   .option("--skip-session", "Ignorar sesión activa (comportamiento v0.1.0)")
   .action(async (opts) => {
     await evolveCommand(opts);
+  });
+
+program
+  .command("auto")
+  .description(
+    "Pipeline completo: de intent a código implementado (explore → snapshot → plan → run → learn).",
+  )
+  .argument("<intent...>", "La intención a implementar")
+  .option("-a, --agent <name>", "Agente local (codex | claude | gemini)")
+  .option("-p, --provider <name>", "Provider LLM: anthropic | openai | gemini | cli  [default: $SLAD_DEFAULT_PROVIDER]")
+  .option("-m, --model <name>", "Modelo a usar")
+  .option("--max-cost <usd>", "Budget máximo en USD (default: 1.0)", parseFloat)
+  .option("--max-tasks <n>", "Máximo de tasks a ejecutar (default: 10)", parseInt)
+  .option("--harness <mode>", "Modo del arnés de seguridad (off | on | strict)", "on")
+  .option("--dry-run", "Solo explore+snapshot+plan, sin ejecutar código")
+  .option("--skip-learn", "No ejecutar learn al final")
+  .option("--json", "Output JSON del report final")
+  .action(async (intentParts: string[], opts) => {
+    await autoCommand(intentParts.join(" "), {
+      provider: opts.provider,
+      agent: opts.agent,
+      model: opts.model,
+      maxCost: opts.maxCost,
+      maxTasks: opts.maxTasks,
+      harness: opts.harness,
+      dryRun: opts.dryRun,
+      skipLearn: opts.skipLearn,
+      json: opts.json,
+    });
   });
 
 program

@@ -15,6 +15,7 @@ import { planCommand } from "./plan.js";
 import { runCommand } from "./run.js";
 import { learnCommand } from "./learn.js";
 import { evolveCommand } from "./evolve.js";
+import { autoCommand } from "./auto.js";
 import { sessionShowCommand } from "./session.js";
 
 export interface ChatOpts {
@@ -34,6 +35,7 @@ type ChatAction =
   | { type: "run-next" }
   | { type: "learn" }
   | { type: "evolve" }
+  | { type: "auto"; intent: string }
   | { type: "status" }
   | { type: "new" }
   | { type: "help" }
@@ -60,9 +62,14 @@ export function parseAction(raw: string, session: SessionState | null): ChatActi
   if (/^(learn|aprender?)$/i.test(lower)) return { type: "learn" };
   if (/^(plan|planificar?)$/i.test(lower)) return { type: "plan" };
   if (/^snapshot$/i.test(lower)) return { type: "snapshot" };
-  if (/^(run\s+--auto|run\s+auto|run\s+todo|auto|ejecutar?\s+todo)$/i.test(lower)) {
+  if (/^(run\s+--auto|run\s+auto|run\s+todo|ejecutar?\s+todo)$/i.test(lower)) {
     return { type: "run-auto" };
   }
+  // "auto <intent>" o "pipeline <intent>" → pipeline completo para ese intent
+  const autoMatch = trimmed.match(/^(?:auto|pipeline|completo)\s+(.+)/i);
+  if (autoMatch) return { type: "auto", intent: autoMatch[1]! };
+  // "auto" a secas (sin intent) → run-auto (compatibilidad previa)
+  if (/^auto$/i.test(lower)) return { type: "run-auto" };
   const taskMatch = trimmed.match(/^(?:run\s+)?(T\d+)$/i);
   if (taskMatch) return { type: "run-task", taskId: taskMatch[1].toUpperCase() };
   if (/^(run|ejecutar?)$/i.test(lower)) return { type: "run-next" };
@@ -228,6 +235,16 @@ async function executeAction(
 
     case "evolve":
       await safeCall(() => evolveCommand(base));
+      break;
+
+    case "auto":
+      await safeCall(() =>
+        autoCommand(action.intent, {
+          provider: opts.provider,
+          agent: opts.agent,
+          model: opts.model,
+        }),
+      );
       break;
 
     case "status":

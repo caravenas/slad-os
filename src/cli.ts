@@ -8,6 +8,7 @@ import { runCommand } from "./commands/run.js";
 import { learnCommand } from "./commands/learn.js";
 import { evolveCommand } from "./commands/evolve.js";
 import { autoCommand } from "./commands/auto.js";
+import { statsCommand } from "./commands/stats.js";
 import {
   sessionStartCommand,
   sessionListCommand,
@@ -40,6 +41,7 @@ Pipeline:
   $ slad run T1 -a gemini
   $ slad learn -a gemini
   $ slad evolve -a gemini
+  $ slad stats
 
 Modo conversacional (independiente del pipeline):
 
@@ -52,6 +54,14 @@ program
   .description("Imprime la versión de SLAD OS.")
   .action(() => {
     process.stdout.write(`${cliVersion}\n`);
+  });
+
+program
+  .command("stats")
+  .description("Muestra totales de sesiones, runs y learnings del proyecto.")
+  .option("--json", "Imprimir JSON plano en stdout")
+  .action(async (opts) => {
+    await statsCommand(opts);
   });
 
 program
@@ -107,7 +117,7 @@ program
   .option("-a, --agent <name>", "Agente local (codex | claude | gemini)")
   .option("-p, --provider <name>", "Provider LLM: anthropic | openai | gemini | cli  [default: $SLAD_DEFAULT_PROVIDER]")
   .option("-m, --model <name>", "Modelo a usar (ej. claude-sonnet-4-5, gpt-4o, gemini-2.0-flash)  [default: $SLAD_MODEL / $<PROVIDER>_MODEL]")
-  .option("-o, --output <path>", "Ruta de salida del reporte JSON (default: ./runs/<timestamp>-<task>.json)")
+  .option("-o, --output <path>", "[DEPRECATED] Ignorado; los runs se guardan en <docsRoot>/log/runs/")
   .option("--max-rounds <n>", "Máximo de rounds HITL antes de marcar blocked (default: 3)", parseInt)
   .option("--auto", "Ejecutar el DAG completo de tareas automáticamente")
   .option("--max-tasks <n>", "Budget de ejecuciones en modo --auto (default: 10)", parseInt)
@@ -123,7 +133,7 @@ program
 program
   .command("learn")
   .description("Learn Agent: captura decisiones, errores y patrones desde un run report.")
-  .option("-i, --input <path>", "Ruta a un run report JSON (default: último ./runs/*.json)")
+  .option("-i, --input <path>", "Ruta a un run report .md o JSON legacy (default: último run persistido)")
   .option("-a, --agent <name>", "Agente local (codex | claude | gemini)")
   .option("-p, --provider <name>", "Provider LLM: anthropic | openai | gemini | cli  [default: $SLAD_DEFAULT_PROVIDER]")
   .option("-m, --model <name>", "Modelo a usar (ej. claude-sonnet-4-5, gpt-4o, gemini-2.0-flash)  [default: $SLAD_MODEL / $<PROVIDER>_MODEL]")

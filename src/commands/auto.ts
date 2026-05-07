@@ -12,11 +12,22 @@ import type { AutoReport } from "../context/types.js";
 import { createHarness } from "../harness/index.js";
 import { loadHarnessConfig } from "../harness/config.js";
 
-import { generateExploreOutput } from "./explore.js";
-import { generateSnapshotOutput } from "./snapshot.js";
-import { generatePlanOutput } from "./plan.js";
 import { generateLearnOutput } from "./learn.js";
 import { runAutoLoop } from "./run.js";
+import { hitlLoop } from "../core/hitl-loop.js";
+import {
+  autoResolveExplore,
+  autoResolveGeneric,
+  autoResolvePlan,
+} from "../core/hitl-auto-resolve.js";
+import {
+  EXPLORER_SYSTEM,
+  SNAPSHOT_SYSTEM,
+  PLANNER_SYSTEM,
+} from "../agents/prompts.js";
+import { ExploreOutput, SnapshotOutput, PlanOutput } from "../core/types.js";
+import { readWikiContextCached } from "../agents/explorer.js";
+import { projectContextBlock } from "../core/context.js";
 
 export interface AutoOpts {
   provider?: string;
@@ -49,6 +60,15 @@ class PipelineStop extends Error {
 
 function ts(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function extractJson(raw: string): string {
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  const body = fenced ? fenced[1] : raw;
+  const first = body.indexOf("{");
+  const last = body.lastIndexOf("}");
+  if (first === -1 || last === -1 || last <= first) return body.trim();
+  return body.slice(first, last + 1).trim();
 }
 
 function stageOutputDir(stage: string): string {
@@ -140,28 +160,50 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
 
   try {
     // ══════════════════════════════════════════════════════════════════════════
-    // STAGE 1: EXPLORE
+    // STAGE 1: EXPLORE (con HITL interactivo)
     // ══════════════════════════════════════════════════════════════════════════
     const exploreSpinner = ora("Explore · analizando intent...").start();
 
-    const exploreResult = await generateExploreOutput({
-      intent,
+    const wikiContext = await readWikiContextCached(config.wikiPath);
+    const exploreProjectCtx = projectContextBlock();
+    const exploreUserContent = [
+      wikiContext.text
+        ? `Contexto de la wiki del usuario (solo referencia):\n\n${wikiContext.text}\n\n---\n`
+        : "",
+      exploreProjectCtx,
+      `Intención del usuario:\n${intent}`,
+    ].filter(Boolean).join("\n\n");
+
+    exploreSpinner.stop(); // Stop before hitlLoop (may need interactive I/O)
+
+    const exploreHitl = await hitlLoop(
       provider,
-      providerName,
-      model,
-      wikiPath: config.wikiPath,
-      onUsage: makeUsageCb("explore"),
-    });
-    const exploreOutput = exploreResult.value;
+      [{ role: "user", content: exploreUserContent }],
+      {
+        stageName: "Explorer",
+        maxRounds: 3,
+        completionOpts: {
+          systemPrompt: EXPLORER_SYSTEM,
+          temperature: 0.5,
+          maxTokens: 2048,
+          model,
+          onUsage: makeUsageCb("explore"),
+        },
+        parse: (raw) => ExploreOutput.parse(JSON.parse(extractJson(raw))),
+        autoResolve: autoResolveExplore,
+      },
+    );
+    const exploreOutput = exploreHitl.output;
 
     if (exploreOutput.status === "awaiting_human") {
-      exploreSpinner.warn("Explore requiere decisión humana — deteniendo pipeline");
+      log.warn("  Explore · HITL agotado, quedaron preguntas sin resolver");
       stoppedAt = "explore";
-      stopReason = `HITL requerido: ${exploreOutput.questions.map((q) => q.prompt).join("; ")}`;
+      stopReason = `HITL sin resolver: ${exploreOutput.questions.map((q) => q.prompt).join("; ")}`;
     } else {
-      exploreSpinner.succeed(
+      ora().succeed(
         `Explore · ${exploreOutput.approaches.length} enfoques, ${exploreOutput.risks.length} riesgos`,
       );
+      if (exploreHitl.rounds > 0) log.dim(`    (${exploreHitl.rounds} rondas HITL)`);
     }
 
     const explorePath = saveStageArtifact("explore", exploreOutput);
@@ -178,24 +220,54 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // STAGE 2: SNAPSHOT
+    // STAGE 2: SNAPSHOT (con HITL interactivo)
     // ══════════════════════════════════════════════════════════════════════════
-    const snapSpinner = ora("Snapshot · generando mini-spec...").start();
+    ora("Snapshot · generando mini-spec...").stop();
 
-    const snapshotOutput = await generateSnapshotOutput({
-      exploreOutput,
-      approach: undefined, // usa el primer approach (recomendado)
+    const chosenApproach = exploreOutput.approaches[0];
+    const snapshotProjectCtx = projectContextBlock();
+    const snapshotUserContent = [
+      snapshotProjectCtx,
+      `Intent original:\n${exploreOutput.intent}`,
+      `Reframing:\n${exploreOutput.reframing}`,
+      chosenApproach
+        ? `Enfoque elegido — ${chosenApproach.name}:\n${chosenApproach.summary}\nPros: ${chosenApproach.pros.join("; ")}\nCons: ${chosenApproach.cons.join("; ")}`
+        : "",
+      exploreOutput.risks.length
+        ? `Riesgos conocidos:\n- ${exploreOutput.risks.join("\n- ")}`
+        : "",
+      exploreOutput.openQuestions.length
+        ? `Preguntas abiertas:\n- ${exploreOutput.openQuestions.join("\n- ")}`
+        : "",
+      `Next step sugerido: ${exploreOutput.recommendedNext}`,
+    ].filter(Boolean).join("\n\n");
+
+    const snapshotHitl = await hitlLoop(
       provider,
-      model,
-      onUsage: makeUsageCb("snapshot"),
-    });
+      [{ role: "user", content: snapshotUserContent }],
+      {
+        stageName: "Snapshot",
+        maxRounds: 3,
+        completionOpts: {
+          systemPrompt: SNAPSHOT_SYSTEM,
+          temperature: 0.3,
+          maxTokens: 1500,
+          model,
+          onUsage: makeUsageCb("snapshot"),
+        },
+        parse: (raw) => SnapshotOutput.parse(JSON.parse(extractJson(raw))),
+        autoResolve: autoResolveGeneric,
+      },
+    );
+    const snapshotOutput = snapshotHitl.output;
 
     if (snapshotOutput.status === "awaiting_human") {
-      snapSpinner.warn("Snapshot requiere decisión humana — deteniendo pipeline");
+      log.warn("  Snapshot · HITL agotado, quedaron preguntas sin resolver");
       stoppedAt = "snapshot";
-      stopReason = `HITL requerido en snapshot`;
+      stopReason = `HITL sin resolver en snapshot`;
     } else {
-      snapSpinner.succeed("Snapshot · mini-spec lista");
+      ora().succeed("Snapshot · mini-spec lista");
+      if (snapshotHitl.rounds > 0) log.dim(`    (${snapshotHitl.rounds} rondas HITL)`);
     }
 
     const snapshotPath = saveStageArtifact("snapshot", snapshotOutput);
@@ -212,25 +284,42 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
     }
 
     // ══════════════════════════════════════════════════════════════════════════
-    // STAGE 3: PLAN
+    // STAGE 3: PLAN (con HITL interactivo)
     // ══════════════════════════════════════════════════════════════════════════
-    const planSpinner = ora("Plan · generando tasks...").start();
+    ora("Plan · generando tasks...").stop();
 
-    const planResult = await generatePlanOutput({
-      snapshotContent: snapshotOutput.content,
+    const planProjectCtx = projectContextBlock();
+    const planUserContent = [
+      planProjectCtx,
+      `Snapshot:\n\n${snapshotOutput.content}`,
+    ].filter(Boolean).join("\n\n");
+
+    const planHitl = await hitlLoop(
       provider,
-      providerName,
-      model,
-      onUsage: makeUsageCb("plan"),
-    });
-    const planOutput = planResult.value;
+      [{ role: "user", content: planUserContent }],
+      {
+        stageName: "Planner",
+        maxRounds: 3,
+        completionOpts: {
+          systemPrompt: PLANNER_SYSTEM,
+          temperature: 0.2,
+          maxTokens: 2500,
+          model,
+          onUsage: makeUsageCb("plan"),
+        },
+        parse: (raw) => PlanOutput.parse(JSON.parse(extractJson(raw))),
+        autoResolve: autoResolvePlan,
+      },
+    );
+    const planOutput = planHitl.output;
 
     if (planOutput.status === "awaiting_human") {
-      planSpinner.warn("Plan requiere decisión humana — deteniendo pipeline");
+      log.warn("  Plan · HITL agotado, quedaron preguntas sin resolver");
       stoppedAt = "plan";
-      stopReason = `HITL requerido en plan`;
+      stopReason = `HITL sin resolver en plan`;
     } else {
-      planSpinner.succeed(`Plan · ${planOutput.tasks.length} tareas generadas`);
+      ora().succeed(`Plan · ${planOutput.tasks.length} tareas generadas`);
+      if (planHitl.rounds > 0) log.dim(`    (${planHitl.rounds} rondas HITL)`);
     }
 
     const planPath = saveStageArtifact("plan", planOutput);
@@ -273,7 +362,7 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
           maxRounds: 3,
           harness: harnessMode,
           auto: true,
-          nonInteractive: true,
+          nonInteractive: false, // HITL interactivo en auto mode
           scratchpad,
           onUsage: makeUsageCb("run"),
         },

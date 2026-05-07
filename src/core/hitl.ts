@@ -37,7 +37,7 @@ export async function collectAnswers(questions: Question[]): Promise<Record<stri
 
 export function formatAnswersForPrompt(answers: Record<string, string>): string {
   const lines = Object.entries(answers).map(([id, value]) => `- ${id}: ${value}`);
-  return `Respuestas del humano:\n${lines.join("\n")}\n\nContinuá la tarea con esta información.`;
+  return `Respuestas del humano:\n${lines.join("\n")}\n\nContinuá la tarea con esta información. Respondé ÚNICAMENTE con el JSON de output según el schema esperado, sin texto adicional.`;
 }
 
 export function printHitlHeader(label: string, summary: string, round: number, maxRounds: number): void {

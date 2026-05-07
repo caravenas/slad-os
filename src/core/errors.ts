@@ -118,6 +118,26 @@ export class VersionError extends SladError {
 }
 
 /**
+ * Persistence error for markdown/YAML artifact read/write operations.
+ * phase: "yaml" — YAML parse failed; "zod" — Zod validation failed; "filesystem" — I/O error.
+ */
+export class ParseError extends SladError {
+  readonly path: string | undefined;
+  readonly phase: "yaml" | "zod" | "filesystem";
+
+  constructor(
+    message: string,
+    opts: { path?: string; phase: "yaml" | "zod" | "filesystem"; cause?: unknown } = { phase: "yaml" },
+  ) {
+    super(message, "PARSE_ERROR", { path: opts.path, phase: opts.phase });
+    this.name = "ParseError";
+    this.path = opts.path;
+    this.phase = opts.phase;
+    if (opts.cause) this.cause = opts.cause;
+  }
+}
+
+/**
  * Determines whether an error is retryable (e.g. rate limit).
  */
 export function isRetryable(err: unknown): boolean {

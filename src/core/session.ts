@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { SessionError } from "./errors.js";
 import { SessionState, type SessionArtifactKind, type SessionAnswer } from "./types.js";
 
 const SESSIONS_DIR = "sessions";
@@ -32,6 +33,35 @@ function statePath(id: string, cwd: string): string {
 
 function activeFilePath(cwd: string): string {
   return path.join(cwd, ACTIVE_FILE);
+}
+
+function loadSessionStrict(id: string, cwd = process.cwd()): SessionState {
+  const p = statePath(id, cwd);
+  if (!fs.existsSync(p)) {
+    throw new SessionError(`Sesión '${id}' sin state.json.`, { sessionId: id, path: p });
+  }
+
+  let raw: unknown;
+  try {
+    raw = JSON.parse(fs.readFileSync(p, "utf8"));
+  } catch (err) {
+    throw new SessionError(`Sesión '${id}' tiene JSON inválido en state.json.`, {
+      sessionId: id,
+      path: p,
+      cause: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  const parsed = SessionState.safeParse(raw);
+  if (!parsed.success) {
+    throw new SessionError(`Sesión '${id}' no cumple el schema SessionState.`, {
+      sessionId: id,
+      path: p,
+      issues: parsed.error.issues.map((issue) => issue.message),
+    });
+  }
+
+  return parsed.data;
 }
 
 export function createSession(intent: string, cwd = process.cwd()): SessionState {
@@ -92,8 +122,7 @@ export function listSessions(cwd = process.cwd()): SessionState[] {
   return fs
     .readdirSync(root)
     .filter((entry) => fs.statSync(path.join(root, entry)).isDirectory())
-    .map((entry) => loadSession(entry, cwd))
-    .filter((s): s is SessionState => s !== null)
+    .map((entry) => loadSessionStrict(entry, cwd))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 

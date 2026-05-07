@@ -9,6 +9,8 @@ import { collectAnswers, formatAnswersForPrompt, printHitlHeader } from "../core
 import { projectContextBlock } from "../core/context.js";
 import { log } from "../core/logger.js";
 import { getProvider } from "../models/index.js";
+import { listArtifacts } from "../persistence/index.js";
+import { parseRun } from "../persistence/parse/run.js";
 import {
   getActiveSession,
   lastArtifactPath,
@@ -43,7 +45,7 @@ function timestamp(): string {
 // ─── Pure generator (sin UI) ──────────────────────────────────────────────────
 
 export interface GenerateLearnOpts {
-  /** Path al run report JSON o al directorio de runs (usa el más reciente) */
+  /** Path al run report .md/JSON legacy o al directorio de runs (usa el más reciente) */
   runPath: string;
   provider: Awaited<ReturnType<typeof getProvider>>;
   model?: string;
@@ -60,12 +62,12 @@ export async function generateLearnOutput(opts: GenerateLearnOpts): Promise<Lear
   // Resolve: si runPath es un directorio, usar el json más reciente
   let resolvedPath = opts.runPath;
   if (fs.existsSync(opts.runPath) && fs.statSync(opts.runPath).isDirectory()) {
-    const latest = latestJsonFile(opts.runPath);
+    const latest = await latestRunFile(opts.runPath);
     if (!latest) throw new Error(`No hay run reports en ${opts.runPath}`);
     resolvedPath = latest;
   }
 
-  const run = readRun(resolvedPath);
+  const run = await readRun(resolvedPath);
   const projectCtx = projectContextBlock(opts.cwd);
 
   const userContent = [
@@ -95,26 +97,49 @@ export async function generateLearnOutput(opts: GenerateLearnOpts): Promise<Lear
   return result.data;
 }
 
-function latestJsonFile(dir: string): string | null {
+function latestLegacyJsonFile(dir: string): string | null {
   if (!fs.existsSync(dir)) return null;
   const files = fs
     .readdirSync(dir)
     .filter((file) => file.endsWith(".json"))
+    // Excluir auto reports y auto-report (no son RunOutput individuales)
+    .filter((file) => !/-auto\.json$/.test(file) && !/-auto-report\.json$/.test(file))
     .map((file) => path.join(dir, file))
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
   return files[0] ?? null;
 }
 
-function readRun(input: string | undefined, sessionRunPath?: string): { source: string; content: RunOutput } {
-  const runPath = path.resolve(
+async function latestRunFile(dir: string): Promise<string | null> {
+  const legacy = latestLegacyJsonFile(dir);
+  if (legacy) return legacy;
+
+  const refs = await listArtifacts("run");
+  return refs
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .find((ref) => fs.existsSync(ref.path))?.path ?? null;
+}
+
+async function readRun(input: string | undefined, sessionRunPath?: string): Promise<{ source: string; content: RunOutput }> {
+  let candidate =
     input ??
     sessionRunPath ??
-    latestJsonFile(path.join(process.cwd(), "runs")) ??
-    "",
-  );
-  if (!runPath || !fs.existsSync(runPath)) {
-    throw new Error("No existe un run report. Usa --input <runs/run.json> o corre `slad run` primero.");
+    await latestRunFile(path.join(process.cwd(), "runs")) ??
+    "";
+
+  if (candidate && fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+    candidate = await latestRunFile(candidate) ?? "";
   }
+
+  const runPath = path.resolve(candidate);
+  if (!runPath || !fs.existsSync(runPath)) {
+    throw new Error("No existe un run report. Usa --input <run.md|run.json> o corre `slad run` primero.");
+  }
+
+  if (runPath.endsWith(".md")) {
+    const parsed = parseRun(fs.readFileSync(runPath, "utf8"), runPath);
+    return { source: runPath, content: parsed.value };
+  }
+
   const raw = JSON.parse(fs.readFileSync(runPath, "utf8"));
   return { source: runPath, content: RunOutput.parse(raw) };
 }
@@ -169,7 +194,7 @@ export async function learnCommand(opts: LearnOpts): Promise<void> {
 
   let run: { source: string; content: RunOutput };
   try {
-    run = readRun(opts.input, sessionRunPath);
+    run = await readRun(opts.input, sessionRunPath);
   } catch (err) {
     log.error((err as Error).message);
     process.exit(1);

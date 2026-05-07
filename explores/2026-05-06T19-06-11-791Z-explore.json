@@ -1,0 +1,117 @@
+{
+  "status": "awaiting_human",
+  "intent": "Agregar un comando slad stats que muestre cuántas sesiones, runs y learnings hay en el proyecto",
+  "reframing": "Se quiere agregar un comando CLI `slad stats` que inspeccione el estado persistido del proyecto y muestre métricas básicas de uso: cantidad de sesiones, ejecuciones de run y aprendizajes registrados. La decisión principal es definir desde qué fuente se calculan esas métricas y qué nivel de detalle debe exponer el comando.",
+  "approaches": [
+    {
+      "name": "Conteo desde SessionState",
+      "summary": "Leer los archivos de sesión existentes y contar artifacts por `kind`.",
+      "pros": [
+        "Aprovecha la fuente de verdad actual del sistema: `SessionState.artifacts`.",
+        "Mantiene el comando provider-agnostic y sin acoplarse a detalles de agentes concretos.",
+        "Permite contar runs y learnings aunque cambie la estructura interna de los artifacts, siempre que el `kind` se mantenga estable.",
+        "Es coherente con la arquitectura actual donde los artifacts se registran en sesión."
+      ],
+      "cons": [
+        "Solo cuenta artifacts registrados correctamente; si hay archivos huérfanos en disco, no aparecen.",
+        "Depende de que todas las sesiones tengan formato válido y sean parseables.",
+        "Puede requerir definir cómo descubrir múltiples sesiones si hoy `session.ts` está orientado a una sesión activa."
+      ]
+    },
+    {
+      "name": "Conteo por filesystem",
+      "summary": "Escanear `.slad-os` o el directorio de artifacts y contar archivos de sesiones, runs y learnings por nombre/ruta.",
+      "pros": [
+        "Puede detectar archivos existentes aunque no estén referenciados por un índice de sesión.",
+        "Implementación simple si la estructura de carpetas es estable.",
+        "Útil para diagnosticar inconsistencias entre disco y SessionState."
+      ],
+      "cons": [
+        "Acopla el comando a convenciones de path/naming que pueden cambiar.",
+        "Riesgo de contar archivos temporales, corruptos o legacy.",
+        "Menos alineado con el patrón del proyecto de artifacts tipados y validados."
+      ]
+    },
+    {
+      "name": "Stats estructuradas con validación",
+      "summary": "Crear una función core `getProjectStats()` que carga sesiones, valida schemas y devuelve un objeto tipado para el comando CLI.",
+      "pros": [
+        "Separa lógica de negocio del comando Commander.",
+        "Facilita tests con `node:test` usando fixtures de sesiones.",
+        "Permite extender luego con métricas como tareas completadas, bloqueadas o última actividad.",
+        "Encaja con el estilo del proyecto: tipos Zod, errores claros y comandos delgados."
+      ],
+      "cons": [
+        "Más trabajo inicial que un conteo inline en el comando.",
+        "Requiere decidir el contrato exacto del objeto stats.",
+        "Puede exponer huecos en la API actual de `session.ts` si no existe una función de listado."
+      ]
+    },
+    {
+      "name": "Stats desde audit log",
+      "summary": "Contar eventos en `.slad-os/audit.ldjson` para inferir runs y actividad operacional.",
+      "pros": [
+        "Puede reflejar actividad real del harness, incluyendo comandos ejecutados.",
+        "Sirve para métricas de riesgo y auditoría más adelante.",
+        "Append-only, por lo que preserva historial operacional."
+      ],
+      "cons": [
+        "No todos los proyectos o modos pueden tener harness activo.",
+        "`learning` no necesariamente existe como evento de auditoría.",
+        "Mezcla métricas de producto con métricas de ejecución técnica.",
+        "No debería ser la fuente primaria para sesiones o artifacts tipados."
+      ]
+    }
+  ],
+  "risks": [
+    "Ambigüedad sobre qué significa exactamente `runs`: comandos `slad run`, artifacts `RunOutput`, tareas ejecutadas o entradas auditadas por harness.",
+    "Ambigüedad sobre qué significa `learnings`: comandos `slad learn`, artifacts `LearnOutput` o entradas wiki generadas.",
+    "Si no existe una API para listar todas las sesiones, habrá que introducirla sin romper el manejo de sesión actual.",
+    "El comando puede mostrar números engañosos si cuenta archivos corruptos o artifacts no registrados.",
+    "Si el output se diseña solo para humanos, después será más difícil automatizarlo; conviene decidir si necesita `--json` desde el inicio."
+  ],
+  "openQuestions": [
+    "¿`runs` debe contar artifacts `RunOutput` o invocaciones del comando `slad run`?",
+    "¿`learnings` debe contar artifacts `LearnOutput` o entradas persistidas en wiki/log?",
+    "¿El comando debe mostrar solo totales globales o también desglose por sesión?",
+    "¿Debe incluir salida JSON con `--json` para scripts y futuras UIs?",
+    "¿Cuál es la fuente canónica actual para descubrir todas las sesiones del proyecto?"
+  ],
+  "recommendedNext": "Decidir la semántica exacta de las métricas y luego implementar el enfoque de stats estructuradas: agregar una función core que liste sesiones, cuente artifacts por kind y un comando `stats` con salida humana mínima y opcionalmente `--json`.",
+  "questions": [
+    {
+      "id": "runs_semantics",
+      "prompt": "¿Qué debe contar `runs` en `slad stats`?",
+      "kind": "choice",
+      "choices": [
+        "Artifacts `RunOutput` registrados en sesiones",
+        "Invocaciones del comando `slad run`",
+        "Comandos ejecutados por harness/audit log"
+      ],
+      "default": "Artifacts `RunOutput` registrados en sesiones",
+      "blocking": true,
+      "context": "La arquitectura actual persiste artifacts tipados en `SessionState`, por lo que contar `RunOutput` es lo más estable."
+    },
+    {
+      "id": "learnings_semantics",
+      "prompt": "¿Qué debe contar `learnings` en `slad stats`?",
+      "kind": "choice",
+      "choices": [
+        "Artifacts `LearnOutput` registrados en sesiones",
+        "Entradas creadas en la wiki",
+        "Invocaciones del comando `slad learn`"
+      ],
+      "default": "Artifacts `LearnOutput` registrados en sesiones",
+      "blocking": true,
+      "context": "Contar artifacts mantiene el comando dentro del modelo actual de sesión y evita acoplarlo al formato de la wiki."
+    },
+    {
+      "id": "output_format",
+      "prompt": "¿Debe `slad stats` incluir una opción `--json` además de salida humana?",
+      "kind": "confirm",
+      "default": "true",
+      "blocking": false,
+      "context": "`--json` facilitaría usar el comando desde UI Control Center, MCP o scripts futuros."
+    }
+  ]
+}

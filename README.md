@@ -199,7 +199,7 @@ rm -rf ~/.slad-os/cache/v1/projects/<project-namespace>
 ```
 
 Eso borra solo la cache persistida de ese proyecto. No toca `src/`, `dist/`,
-`snapshots/`, `tasks/`, `runs/` ni otros archivos fuente o artefactos canonicos.
+`snapshots/`, `tasks/`, `docs/` ni otros archivos fuente o artefactos canonicos.
 
 Límites de v1:
 - no hay GC automatico, TTL operativo ni cuotas;
@@ -353,16 +353,20 @@ Output por defecto: `./tasks/tasks.json`.
 ### `slad run`
 
 Ejecuta una tarea de `tasks.json` con el loop Builder + Reviewer y guarda un
-reporte JSON. Si no pasás `--task`, usa `recommendedFirstTask`.
+reporte Markdown con YAML frontmatter en `<docsRoot>/log/runs/`. Si no pasás
+`--task`, usa `recommendedFirstTask`.
 
 ```bash
 slad run
 slad run --task T3
 slad run --agent codex --input ./tasks/tasks.json --task T1
-slad run --agent codex --task T1 --output ./runs/T1.json
+SLAD_DOCS_PATH=/tmp/slad-docs slad run --agent codex --task T1
+slad run --agent codex --task T1 --json
 ```
 
-Output por defecto: `./runs/<timestamp>-<task>.json`.
+Output por defecto: `<docsRoot>/log/runs/<sessionId>_<taskId>.md`.
+`--output` está deprecated y se ignora; usa `SLAD_DOCS_PATH` o
+`.slad-os/config.json` para cambiar el destino.
 
 #### Auto-loop (`--auto`)
 
@@ -394,15 +398,15 @@ patrones, preguntas abiertas y follow-ups.
 
 ```bash
 slad learn
-slad learn --agent codex --input ./runs/T1.json
-slad learn --agent codex --input ./runs/T1.json --output ./learnings/T1.md
+slad learn --agent codex --input ./docs/log/runs/<sessionId>_T1.md
+slad learn --agent codex --input ./docs/log/runs/<sessionId>_T1.md --output ./learnings/T1.md
 ```
 
 Output por defecto: `./learnings/<timestamp>-<task>.md`.
 
 ### `slad evolve`
 
-Revisa artefactos recientes (`snapshots/`, `tasks/`, `runs/`, `learnings/`) y
+Revisa artefactos recientes (`snapshots/`, `tasks/`, `learnings/` y reportes legacy en `runs/`) y
 propone actualizaciones para wiki/patrones.
 
 ```bash

@@ -26,6 +26,15 @@ Después de este feature:
 
 ## Diseño General
 
+### Archivos ya implementados (NO crear, ya existen)
+
+```
+src/
+  core/
+    hitl-loop.ts           # Generic HITL loop para el auto pipeline (hitlLoop function)
+    hitl-auto-resolve.ts   # Auto-resolve heuristics (autoResolveGeneric, autoResolveExplore, autoResolvePlan)
+```
+
 ### Nuevos archivos a crear
 
 ```
@@ -48,6 +57,7 @@ src/models/openai.ts       # Extraer usage tokens del response
 src/cli.ts                 # Registrar comando auto
 src/core/types.ts          # Agregar AutoReport schema
 src/commands/chat.ts       # Agregar "auto" como action en el REPL
+src/commands/run.ts        # Agregar auto-resolve en HITL de executeTask, exportar runAutoLoop
 ```
 
 ---
@@ -562,6 +572,23 @@ opts.onUsage?.(res.usage?.prompt_tokens ?? 0, res.usage?.completion_tokens ?? 0)
 
 ## Parte 2: Pipeline Orchestrator
 
+### NOTA: HITL interactivo ya implementado
+
+Los siguientes archivos ya fueron creados y deben usarse en el auto command:
+
+- `src/core/hitl-loop.ts` — `hitlLoop()`: función genérica que encapsula el patrón
+  "call LLM → check awaiting_human → auto-resolve → interactive HITL → retry".
+  Reutiliza `collectAnswers` y `formatAnswersForPrompt` del hitl.ts existente.
+
+- `src/core/hitl-auto-resolve.ts` — Heurísticas de auto-resolución:
+  - `autoResolveGeneric()`: confirm con default → usa default, choice con 1 opción → la usa,
+    choice con default → usa default, non-blocking con default → usa default.
+  - `autoResolveExplore()`: además auto-selecciona primer approach si la pregunta es de approach.
+  - `autoResolvePlan()`: además usa default ranking si existe.
+
+El auto command DEBE usar `hitlLoop()` para cada stage en vez de detenerse o skipear.
+El run phase usa su propio HITL existente pero con las mismas auto-resolve heurísticas.
+
 ### T6: Auto Command (`src/commands/auto.ts`)
 
 El orquestador principal:
@@ -649,29 +676,38 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
     // ═══════════════════════════════════════════════════════════════════════
     const exploreSpinner = ora("Explore · analizando intent...").start();
     
-    const exploreOutput = await generateExploreOutput({
-      intent,
+    // generateExploreOutput produces the first call. If it returns awaiting_human,
+    // hitlLoop handles HITL interactively (auto-resolve + ask user if needed).
+    const exploreResult = await runStageWithHitl({
+      stageName: "Explore",
       provider,
       model,
+      systemPrompt: EXPLORER_SYSTEM,
+      initialCall: async () => {
+        const result = await generateExploreOutput({
+          intent,
+          provider,
+          providerName,
+          model,
+          onUsage: onUsage("explore"),
+        });
+        return { output: result.value, userContent: result.userContent };
+      },
+      parse: parseExploreOutput,
+      autoResolve: autoResolveExplore,
       onUsage: onUsage("explore"),
     });
 
-    if (exploreOutput.status === "awaiting_human") {
-      exploreSpinner.warn("Explore requiere decisión humana");
-      stopReason = `HITL requerido en explore: ${exploreOutput.questions.map(q => q.prompt).join("; ")}`;
-      stoppedAt = "explore";
-      // Aún así guardar el artifact parcial
-    } else {
-      exploreSpinner.succeed(`Explore · ${exploreOutput.approaches.length} enfoques, ${exploreOutput.risks.length} riesgos`);
-    }
+    const exploreOutput = exploreResult.output;
+    exploreSpinner.succeed(`Explore · ${exploreOutput.approaches.length} enfoques, ${exploreOutput.risks.length} riesgos`);
 
     const explorePath = saveStageArtifact("explore", exploreOutput, session.id);
     saveSession(appendArtifact(session, "explore", explorePath));
     stagesCompleted.push("explore");
     artifacts.explore = explorePath;
 
-    if (exploreOutput.status === "awaiting_human" || budget.isExceeded()) {
-      throw new PipelineStop(stoppedAt ?? "explore", stopReason ?? "Budget excedido");
+    if (budget.isExceeded()) {
+      throw new PipelineStop("explore", "Budget excedido");
     }
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -679,14 +715,28 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
     // ═══════════════════════════════════════════════════════════════════════
     const snapSpinner = ora("Snapshot · generando mini-spec...").start();
 
-    const snapshotOutput = await generateSnapshotOutput({
-      exploreOutput,
-      approach: exploreOutput.approaches[0].name, // Usar primer approach (recomendado)
+    // Snapshot: uses hitlLoop if the LLM needs clarification
+    const snapshotResult = await runStageWithHitl({
+      stageName: "Snapshot",
       provider,
       model,
+      systemPrompt: SNAPSHOT_SYSTEM,
+      initialCall: async () => {
+        const output = await generateSnapshotOutput({
+          exploreOutput,
+          approach: exploreOutput.approaches[0].name,
+          provider,
+          model,
+          onUsage: onUsage("snapshot"),
+        });
+        return { output, userContent: "" }; // userContent not needed for snapshot HITL
+      },
+      parse: parseSnapshotOutput,
+      autoResolve: autoResolveGeneric,
       onUsage: onUsage("snapshot"),
     });
 
+    const snapshotOutput = snapshotResult.output;
     snapSpinner.succeed("Snapshot · mini-spec lista");
     const snapshotPath = saveStageArtifact("snapshot", snapshotOutput, session.id);
     saveSession(appendArtifact(session, "snapshot", snapshotPath));
@@ -702,13 +752,27 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
     // ═══════════════════════════════════════════════════════════════════════
     const planSpinner = ora("Plan · generando tasks...").start();
 
-    const planOutput = await generatePlanOutput({
-      snapshotContent: snapshotOutput.content,
+    const planResult = await runStageWithHitl({
+      stageName: "Plan",
       provider,
       model,
+      systemPrompt: PLANNER_SYSTEM,
+      initialCall: async () => {
+        const result = await generatePlanOutput({
+          snapshotContent: snapshotOutput.content,
+          provider,
+          providerName,
+          model,
+          onUsage: onUsage("plan"),
+        });
+        return { output: result.value, userContent: result.userContent };
+      },
+      parse: parsePlanOutput,
+      autoResolve: autoResolvePlan,
       onUsage: onUsage("plan"),
     });
 
+    const planOutput = planResult.output;
     planSpinner.succeed(`Plan · ${planOutput.tasks.length} tareas generadas`);
     const planPath = saveStageArtifact("plan", planOutput, session.id);
     saveSession(appendArtifact(session, "plan", planPath));
@@ -869,9 +933,66 @@ function printAutoReport(report: AutoReport, durationMs: number): void {
 }
 ```
 
+**Patrón `runStageWithHitl` — helper para el auto command:**
+
+El auto command necesita un helper que combine la llamada inicial al stage con el hitlLoop
+para manejar HITL si aparece. Implementarlo como función dentro de auto.ts:
+
+```typescript
+import { hitlLoop, type HitlAwareOutput } from "../core/hitl-loop.js";
+
+/**
+ * Runs a pipeline stage with HITL support.
+ * 1. Calls initialCall() to get the first output
+ * 2. If awaiting_human → enters hitlLoop with auto-resolve + interactive HITL
+ * 3. Returns the final resolved output
+ */
+async function runStageWithHitl<T extends HitlAwareOutput>(opts: {
+  stageName: string;
+  provider: ModelProvider;
+  model: string;
+  systemPrompt: string;
+  initialCall: () => Promise<{ output: T; userContent: string }>;
+  parse: (raw: string) => T;
+  autoResolve: (output: T) => Record<string, string>;
+  onUsage?: (input: number, output: number) => void;
+}): Promise<{ output: T; humanAnswers: Record<string, string> }> {
+  const { output, userContent } = await opts.initialCall();
+
+  // If no HITL needed, return immediately
+  if (output.status !== "awaiting_human" || output.questions.length === 0) {
+    return { output, humanAnswers: {} };
+  }
+
+  // Enter HITL loop: the initial output needs human input
+  const messages: ChatMessage[] = [
+    { role: "user", content: userContent },
+    { role: "assistant", content: JSON.stringify(output) },
+  ];
+
+  // Auto-resolve what we can, then ask the user for the rest
+  const result = await hitlLoop(opts.provider, messages, {
+    stageName: opts.stageName,
+    completionOpts: {
+      systemPrompt: opts.systemPrompt,
+      model: opts.model,
+      temperature: 0.2,
+      maxTokens: 2500,
+      onUsage: opts.onUsage,
+    },
+    parse: opts.parse,
+    autoResolve: opts.autoResolve,
+  });
+
+  return { output: result.output, humanAnswers: result.humanAnswers };
+}
+```
+
 **Criterio de aceptación:**
 - `slad auto "intent" --dry-run` ejecuta explore+snapshot+plan y se detiene
 - `slad auto "intent"` ejecuta el pipeline completo
+- Si un stage retorna `awaiting_human`, el pipeline pausa y pregunta al usuario
+- Preguntas con heurísticas obvias se auto-resuelven (no interrumpen)
 - Se genera un AutoReport JSON con budget y stages
 - Budget exceeded detiene el pipeline gracefully
 
@@ -915,33 +1036,37 @@ Hacer lo mismo para:
 
 ---
 
-### T8: Exportar `runAutoLoop` para uso externo
+### T8: Exportar `runAutoLoop` para uso externo con HITL interactivo
 
-El `runAutoLoop` actual en `run.ts` está diseñado para uso interactivo (select de retry/skip, spinners). Necesitamos una versión que el pipeline pueda usar programáticamente.
+El `runAutoLoop` actual en `run.ts` ya tiene HITL interactivo para tasks individuales
+(via collectAnswers en el while loop de executeTask). Para el auto pipeline:
+
+1. **Exportar `runAutoLoop`** si no lo está ya (agregar `export`).
+2. **Agregar opts de scratchpad y budget** para que el auto command los pase.
+3. **HITL sigue siendo interactivo** — cuando una task retorna `awaiting_human`,
+   el loop existente ya pregunta al usuario. NO cambiar esto.
+4. **Agregar auto-resolve como primera capa**: antes de caer a collectAnswers,
+   intentar `autoResolveGeneric()` en las preguntas. Solo preguntar las que quedan sin resolver.
+5. **Fail handling**: mantener el select interactivo de retry/skip/abort — el usuario
+   está presente (es HITL interactivo, no unattended).
+6. **Budget check**: después de cada task, verificar `budget.isExceeded()` y abortar si se pasó.
 
 ```typescript
-// Agregar a run.ts o extraer a un módulo separado:
+// En executeTask(), antes de collectAnswers:
+import { autoResolveGeneric } from "../core/hitl-auto-resolve.js";
 
-export interface RunAutoOpts {
-  maxTasks?: number;
-  maxRounds?: number;
-  harness?: "off" | "on" | "strict";
-  auto?: boolean;
-  scratchpad?: Scratchpad | null;
-  budget?: BudgetTracker | null;
-  onUsage?: (input: number, output: number) => void;
-  /** Si true, en vez de preguntar retry/skip/abort, auto-skip */
-  nonInteractive?: boolean;
-}
-
-// Modificar runAutoLoop para aceptar nonInteractive mode:
-// Cuando nonInteractive=true:
-// - Tasks que fallan → auto-skip (no preguntar al usuario)
-// - HITL awaiting_human → abort (el pipeline se detiene)
-// - Budget exceeded → abort
+// Donde actualmente hace:
+//   const answers = await collectAnswers(output.questions);
+// Reemplazar con:
+const autoAnswers = autoResolveGeneric(output);
+const unresolvedQuestions = output.questions.filter(q => !autoAnswers[q.id]);
+const interactiveAnswers = unresolvedQuestions.length > 0
+  ? await collectAnswers(unresolvedQuestions)
+  : {};
+const answers = { ...autoAnswers, ...interactiveAnswers };
 ```
 
-**Criterio de aceptación:** `runAutoLoop` con `nonInteractive: true` no requiere input del usuario. Tasks fallidas se skipean automáticamente.
+**Criterio de aceptación:** `runAutoLoop` en auto pipeline pregunta al usuario cuando hay HITL, auto-resuelve preguntas obvias, y respeta el budget.
 
 ---
 
@@ -1034,13 +1159,13 @@ Ejecución recomendada: T1 → T2 → T3 → T5 → T4 → T7 → T8 → T6 → 
 
 3. **Harness default "on" en auto**: Más seguro que el default "off" de `slad run` manual. El usuario está menos atento en modo auto, así que comandos `full` requieren aprobación por default.
 
-4. **Non-interactive mode para run**: En auto pipeline, si una task falla, se skipea automáticamente (no pregunta retry/skip/abort). Si hay HITL (awaiting_human), el pipeline se detiene con status "partial" — el usuario puede continuar manualmente después.
+4. **HITL interactivo en auto pipeline**: El pipeline NO es unattended. Cuando cualquier stage (explore, snapshot, plan, run) retorna `awaiting_human`, el pipeline pausa y pregunta al usuario interactivamente. Usa auto-resolve primero para preguntas obvias (confirm con default, choice con 1 opción). Solo escala a HITL interactivo para preguntas que no se pueden auto-resolver. Archivos ya implementados: `src/core/hitl-loop.ts` (loop genérico) y `src/core/hitl-auto-resolve.ts` (heurísticas).
 
 5. **Stage functions puras**: Cada stage exporta una función sin side-effects de UI. Los commands existentes las wrappean con spinners/prints. El auto command las usa directamente con su propia UI mínima.
 
 6. **onUsage como callback**: No extender ProviderResponse con usage (breaking change). Usar un callback en CompletionOptions que los providers invocan opcionalmente. Esto mantiene backward-compatibility total.
 
-7. **Approach selection en auto**: Para snapshot, usa automáticamente el primer approach del explore (el recomendado). Si querés control, usá `--dry-run` + revisa + luego `slad run --auto`.
+7. **Approach selection en auto**: Para snapshot, usa automáticamente el primer approach del explore (el recomendado). Si el LLM pregunta cuál approach, `autoResolveExplore()` elige el primero. Si querés control manual, usá `--dry-run` + revisa + luego `slad run --auto`.
 
 ---
 

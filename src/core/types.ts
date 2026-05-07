@@ -296,3 +296,11 @@ export const ProjectInventory = z.object({
   }),
 });
 export type ProjectInventory = z.infer<typeof ProjectInventory>;
+
+// ─── Project Config (.slad-os/config.json) ───────────────────────────────────
+
+export const ProjectConfig = z.object({
+  docsPath: z.string().default("docs"),
+  // futuras opciones del proyecto van acá
+});
+export type ProjectConfig = z.infer<typeof ProjectConfig>;

@@ -49,6 +49,7 @@
     "kleur": "^4.1.5",
     "openai": "^4.67.0",
     "ora": "^8.1.0",
+    "yaml": "^2.8.4",
     "zod": "^3.23.8"
   },
   "devDependencies": {

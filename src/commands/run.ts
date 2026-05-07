@@ -13,6 +13,8 @@ import { collectAnswers, formatAnswersForPrompt, printHitlHeader } from "../core
 import { projectContextBlock } from "../core/context.js";
 import { log } from "../core/logger.js";
 import { SchemaError, SladError, isRetryable } from "../core/errors.js";
+import { writeArtifact } from "../persistence/index.js";
+import { parseRun } from "../persistence/parse/run.js";
 import { createHarness } from "../harness/index.js";
 import { loadHarnessConfig } from "../harness/config.js";
 import type { ExecutionHarness } from "../harness/types.js";
@@ -38,6 +40,11 @@ export interface RunOpts {
   provider?: string;
   agent?: string;
   model?: string;
+  /**
+   * @deprecated RunOutput artifacts are written through persistence to
+   * <docsRoot>/log/runs/. Use SLAD_DOCS_PATH or .slad-os/config.json to change
+   * the destination, and --json to print the RunOutput JSON to stdout.
+   */
   output?: string;
   json?: boolean;
   maxRounds?: number;
@@ -79,6 +86,14 @@ function extractJson(raw: string): string {
 
 function timestamp(): string {
   return new Date().toISOString().replace(/[:.]/g, "-");
+}
+
+function warnDeprecatedOutput(outputPath: string): void {
+  log.warn(
+    "`slad run --output` está deprecated y se ignora; los runs se guardan en <docsRoot>/log/runs/.",
+  );
+  log.dim(`  --output recibido: ${outputPath}`);
+  log.dim("  Usa SLAD_DOCS_PATH o .slad-os/config.json para cambiar docsRoot, o --json para stdout.");
 }
 
 function readPlan(planInput: string | undefined): ReturnType<typeof PlanOutput.parse> {
@@ -190,6 +205,8 @@ interface TaskResult {
 interface ExecuteTaskExtras {
   scratchpad?: Scratchpad | null;
   onUsage?: (inputTokens: number, outputTokens: number) => void;
+  /** Used as the sessionId for the persistence layer. Falls back to "adhoc" if not provided. */
+  sessionId?: string;
 }
 
 async function executeTask(
@@ -199,7 +216,7 @@ async function executeTask(
   model: string,
   maxRounds: number,
   sessionCtx: string,
-  outputDir: string,
+  _outputDir: string,
   harness: ExecutionHarness | null = null,
   useTools = true,
   extras: ExecuteTaskExtras = {},
@@ -221,10 +238,10 @@ async function executeTask(
         questions: [],
         humanAnswers: {},
       };
-      const outPath = `${outputDir}/${timestamp()}-${task.id}.json`;
-      fs.mkdirSync(outputDir, { recursive: true });
-      fs.writeFileSync(outPath, JSON.stringify(blockedOutput, null, 2) + "\n", "utf8");
-      return { output: blockedOutput, outPath, humanAnswers: {} };
+      const ref = await writeArtifact("run", blockedOutput, {
+        sessionId: extras.sessionId ?? "adhoc",
+      });
+      return { output: blockedOutput, outPath: ref.path, humanAnswers: {} };
     }
     if (verdict.action === "modify") {
       task = { ...task, ...verdict.patch };
@@ -349,11 +366,11 @@ async function executeTask(
     await harness.afterTask(task, output, Date.now() - taskStart);
   }
 
-  const outPath = path.join(outputDir, `${timestamp()}-${task.id}.json`);
-  fs.mkdirSync(outputDir, { recursive: true });
-  fs.writeFileSync(outPath, JSON.stringify(output, null, 2) + "\n", "utf8");
+  const ref = await writeArtifact("run", output, {
+    sessionId: extras.sessionId ?? "adhoc",
+  });
 
-  return { output, outPath, humanAnswers: allHumanAnswers };
+  return { output, outPath: ref.path, humanAnswers: allHumanAnswers };
 }
 
 // ─── topological sort & DAG helpers ──────────────────────────────────────────
@@ -408,7 +425,7 @@ interface TaskReport {
   output?: RunOutput;
 }
 
-function findCompletedTaskIds(session: SessionState | null, tasks: PlanTask[]): Set<string> {
+async function findCompletedTaskIds(session: SessionState | null, tasks: PlanTask[]): Promise<Set<string>> {
   if (!session) return new Set();
   const taskIds = new Set(tasks.map((t) => t.id));
   const completed = new Set<string>();
@@ -416,9 +433,9 @@ function findCompletedTaskIds(session: SessionState | null, tasks: PlanTask[]): 
     if (artifact.kind !== "run" || !artifact.taskId) continue;
     if (!taskIds.has(artifact.taskId)) continue;
     try {
-      const raw = JSON.parse(fs.readFileSync(artifact.path, "utf8"));
-      const parsed = RunOutput.safeParse(raw);
-      if (parsed.success && parsed.data.status === "completed") {
+      const text = fs.readFileSync(artifact.path, "utf8");
+      const { value } = parseRun(text, artifact.path);
+      if (value.status === "completed") {
         completed.add(artifact.taskId);
       }
     } catch {
@@ -446,7 +463,7 @@ export async function runAutoLoop(
   const state = new Map<string, TaskStatus>(tasks.map((t) => [t.id, "pending"]));
 
   // Resume detection: si la sesión tiene runs completed previos, ofrecer skip
-  const previouslyDone = findCompletedTaskIds(session, tasks);
+  const previouslyDone = await findCompletedTaskIds(session, tasks);
   if (previouslyDone.size > 0) {
     const sortedIds = [...previouslyDone].sort((a, b) =>
       Number(a.slice(1)) - Number(b.slice(1)),
@@ -526,7 +543,7 @@ export async function runAutoLoop(
         path.join(process.cwd(), "runs"),
         harness,
         useTools,
-        { scratchpad: opts.scratchpad, onUsage: opts.onUsage },
+        { scratchpad: opts.scratchpad, onUsage: opts.onUsage, sessionId: currentSession?.id },
       );
     } catch (err) {
       if (err instanceof SladError) {
@@ -605,13 +622,14 @@ export async function runAutoLoop(
             path.join(process.cwd(), "runs"),
             harness,
             useTools,
+            { sessionId: currentSession?.id },
           );
           if (currentSession) {
             const updated = appendArtifact(currentSession, "run", fuResult.outPath, fuTask.id);
             saveSession(updated);
             currentSession = updated;
           }
-          log.success(`Follow-up ${fuTask.id} completado. JSON guardado en ${fuResult.outPath}`);
+          log.success(`Follow-up ${fuTask.id} completado. Guardado en ${fuResult.outPath}`);
         } catch (err) {
           log.error(`Follow-up ${fuTask.id} falló: ${(err as Error).message}`);
         }
@@ -793,6 +811,7 @@ export async function runCommand(opts: RunOpts): Promise<void> {
   const session = opts.skipSession ? null : getActiveSession();
   const planInput = opts.input ?? (session ? lastArtifactPath(session, "plan") : undefined);
   if (!opts.input && session && planInput) log.dim(`  sesión: usando plan en ${planInput}`);
+  if (opts.output) warnDeprecatedOutput(opts.output);
 
   const config = loadConfig();
   const providerName = resolveProvider(opts.provider, opts.agent, config.defaultProvider);
@@ -860,6 +879,7 @@ export async function runCommand(opts: RunOpts): Promise<void> {
       path.join(process.cwd(), "runs"),
       harness,
       opts.tools !== false,
+      { sessionId: session?.id },
     );
   } catch (err) {
     printNewChanges(gitBefore, task.id);
@@ -872,23 +892,18 @@ export async function runCommand(opts: RunOpts): Promise<void> {
 
   let { output, outPath, humanAnswers } = result;
 
-  if (opts.json && !opts.output) {
+  if (opts.json) {
     console.log(JSON.stringify(output, null, 2));
     return;
   }
 
   if (!opts.json) printSingleResult(output, humanAnswers);
 
-  const finalPath = opts.output ?? outPath;
-  if (opts.output) {
-    fs.mkdirSync(path.dirname(path.resolve(opts.output)), { recursive: true });
-    fs.copyFileSync(outPath, opts.output);
-  }
-  log.success(`JSON guardado en ${finalPath}`);
+  log.success(`Guardado en ${outPath}`);
 
   let currentSession = session;
   if (currentSession) {
-    let updated = appendArtifact(currentSession, "run", finalPath, task.id);
+    let updated = appendArtifact(currentSession, "run", outPath, task.id);
     if (Object.keys(humanAnswers).length > 0) {
       updated = appendAnswers(updated, task.id, humanAnswers);
     }
@@ -921,6 +936,7 @@ export async function runCommand(opts: RunOpts): Promise<void> {
           path.join(process.cwd(), "runs"),
           harness,
           opts.tools !== false,
+          { sessionId: currentSession?.id },
         );
         if (currentSession) {
           const updated = appendArtifact(currentSession, "run", fuResult.outPath, fuTask.id);

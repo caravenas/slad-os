@@ -82,7 +82,7 @@ Durable writes today:
 
 - `exploreCommand()` writes `out/explore.json` when a session exists, or a user-specified path;
 - `planCommand()` writes `tasks/tasks.json`;
-- `runCommand()` writes `runs/<timestamp>-<task>.json`;
+- `runCommand()` writes MD+YAML run artifacts to `<docsRoot>/log/runs/`;
 - `learnCommand()` writes `learnings/<timestamp>-<task>.md` or JSON;
 - `evolveCommand()` writes `evolution/<timestamp>-evolve.md` or JSON.
 
@@ -140,7 +140,7 @@ There is no explicit retrieval pipeline today. The nearest current context produ
 - `src/core/session.ts::sessionContextBlock()`
   - derives reusable context from `session.humanAnswers`
 - `src/commands/evolve.ts::buildContext()`
-  - reads recent files from `snapshots/`, `tasks/`, `runs/`, `learnings/`
+  - reads recent files from `snapshots/`, `tasks/`, legacy `runs/`, `learnings/`
   - concatenates them into a prompt context block
 
 These are the strongest candidates for future `retrieved_context` producers because they already materialize prompt context from local sources.
@@ -226,7 +226,7 @@ It matters because:
 
 It matters for cache design because:
 
-- it serializes `RunOutput` to `runs/`;
+- it serializes `RunOutput` through the persistence layer to `<docsRoot>/log/runs/`;
 - it persists human answers into `SessionState`;
 - it is the only flow with explicit HITL rounds;
 - cache integration here is risky and should probably start as read-only or be deferred.

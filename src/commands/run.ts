@@ -374,44 +374,7 @@ async function executeTask(
 
 // ─── topological sort & DAG helpers ──────────────────────────────────────────
 
-type TaskStatus = "pending" | "done" | "skipped" | "failed";
-const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 } as const;
-
-function nextRunnableTask(
-  tasks: PlanTask[],
-  state: Map<string, TaskStatus>,
-): PlanTask | null {
-  const runnable = tasks.filter(
-    (t) =>
-      (state.get(t.id) ?? "pending") === "pending" &&
-      t.dependsOn.every((dep) => state.get(dep) === "done"),
-  );
-  if (runnable.length === 0) return null;
-  return runnable.sort(
-    (a, b) =>
-      PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] ||
-      tasks.indexOf(a) - tasks.indexOf(b),
-  )[0];
-}
-
-function autoSkipDependents(
-  tasks: PlanTask[],
-  state: Map<string, TaskStatus>,
-  skippedId: string,
-): string[] {
-  const skipped: string[] = [];
-  const cascade = (id: string) => {
-    for (const t of tasks) {
-      if (t.dependsOn.includes(id) && (state.get(t.id) ?? "pending") === "pending") {
-        state.set(t.id, "skipped");
-        skipped.push(t.id);
-        cascade(t.id);
-      }
-    }
-  };
-  cascade(skippedId);
-  return skipped;
-}
+import { getParallelRunnableTasks, autoSkipDependents, type TaskStatus } from "./dag.js";
 
 // ─── auto-loop ────────────────────────────────────────────────────────────────
 
@@ -523,7 +486,7 @@ export async function runAutoLoop(
   console.log("");
 
   while (executions < maxTasks) {
-    const task = nextRunnableTask(tasks, state);
+    const task = getParallelRunnableTasks(tasks, state)[0] ?? null;
     if (!task) break;
 
     const sessionCtx = currentSession ? sessionContextBlock(currentSession) : "";

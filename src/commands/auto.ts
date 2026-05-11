@@ -31,6 +31,7 @@ import { readWikiContextCached } from "../agents/explorer.js";
 import { projectContextBlock } from "../core/context.js";
 import { getDocsRoot, listRunsDir } from "../persistence/layout.js";
 import { writeArtifact } from "../persistence/index.js";
+import { saveAutoCheckpoint, clearAutoCheckpoint } from "./auto-checkpoint.js";
 
 export interface AutoOpts {
   provider?: string;
@@ -252,6 +253,7 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
     saveSession(session);
     stagesCompleted.push("explore");
     artifacts["explore"] = explorePath;
+    saveAutoCheckpoint({ intent, sessionId: session.id, lastStageCompleted: "explore", artifacts: { ...artifacts }, budgetState: budget.getState(), savedAt: new Date().toISOString() });
 
     if (exploreOutput.status === "awaiting_human" || budget.isExceeded()) {
       throw new PipelineStop(
@@ -316,6 +318,7 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
     saveSession(session);
     stagesCompleted.push("snapshot");
     artifacts["snapshot"] = snapshotPath;
+    saveAutoCheckpoint({ intent, sessionId: session.id, lastStageCompleted: "snapshot", artifacts: { ...artifacts }, budgetState: budget.getState(), savedAt: new Date().toISOString() });
 
     if (snapshotOutput.status === "awaiting_human" || budget.isExceeded()) {
       throw new PipelineStop(
@@ -368,6 +371,7 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
     saveSession(session);
     stagesCompleted.push("plan");
     artifacts["plan"] = planPath;
+    saveAutoCheckpoint({ intent, sessionId: session.id, lastStageCompleted: "plan", artifacts: { ...artifacts }, budgetState: budget.getState(), savedAt: new Date().toISOString() });
 
     if (planOutput.status === "awaiting_human" || budget.isExceeded()) {
       throw new PipelineStop(
@@ -417,6 +421,7 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
 
     stagesCompleted.push("run");
     artifacts["run"] = await listRunsDir();
+    saveAutoCheckpoint({ intent, sessionId: session.id, lastStageCompleted: "run", artifacts: { ...artifacts }, budgetState: budget.getState(), savedAt: new Date().toISOString() });
 
     if (budget.isExceeded()) {
       throw new PipelineStop("run", "Budget excedido durante run");
@@ -497,6 +502,9 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
   };
 
   const reportPath = await saveAutoReport(report);
+
+  // Clear checkpoint when pipeline completes fully (no partial/failed)
+  if (pipelineStatus === "completed") clearAutoCheckpoint();
 
   // Print summary
   console.log("");

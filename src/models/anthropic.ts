@@ -4,6 +4,7 @@ import type { ChatMessage, CompletionOptions, ProviderName } from "../core/types
 import type { ProviderResponse, ToolCall } from "../tools/types.js";
 import { ProviderError } from "../core/errors.js";
 import { retryWithBackoff } from "./retry.js";
+import { withTimeout, resolveApiTimeoutMs } from "./timeout.js";
 import { log } from "../core/logger.js";
 
 const DEFAULT_MODEL = "MiniMax-M2.7";
@@ -28,16 +29,22 @@ export class AnthropicProvider implements ModelProvider {
         content: m.content,
       }));
 
+    const timeoutMs = resolveApiTimeoutMs();
     const res = await retryWithBackoff(async () => {
       try {
-        return await this.client.messages.create({
-          model: opts.model ?? DEFAULT_MODEL,
-          max_tokens: opts.maxTokens ?? 4096,
-          temperature: opts.temperature ?? 0.4,
-          ...(system ? { system } : {}),
-          messages: chat,
-        });
+        return await withTimeout(
+          this.client.messages.create({
+            model: opts.model ?? DEFAULT_MODEL,
+            max_tokens: opts.maxTokens ?? 4096,
+            temperature: opts.temperature ?? 0.4,
+            ...(system ? { system } : {}),
+            messages: chat,
+          }),
+          timeoutMs,
+          "anthropic",
+        );
       } catch (err: unknown) {
+        if (err instanceof ProviderError) throw err;
         const apiErr = err as { status?: number; message?: string };
         const retryable = apiErr.status === 429 || apiErr.status === 529 || apiErr.status === 500;
         throw new ProviderError(
@@ -66,6 +73,7 @@ export class AnthropicProvider implements ModelProvider {
   }
 
   async completeWithTools(messages: ChatMessage[], opts: ToolUseOptions): Promise<ProviderResponse> {
+    const timeoutMs = resolveApiTimeoutMs();
     const systemFromMessages = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
     const system = opts.systemPrompt ?? systemFromMessages ?? undefined;
 
@@ -98,15 +106,20 @@ export class AnthropicProvider implements ModelProvider {
 
     const res = await retryWithBackoff(async () => {
       try {
-        return await this.client.messages.create({
-          model: opts.model ?? DEFAULT_MODEL,
-          max_tokens: opts.maxTokens ?? 4096,
-          temperature: opts.temperature ?? 0.2,
-          ...(system ? { system } : {}),
-          messages: chat,
-          tools,
-        });
+        return await withTimeout(
+          this.client.messages.create({
+            model: opts.model ?? DEFAULT_MODEL,
+            max_tokens: opts.maxTokens ?? 4096,
+            temperature: opts.temperature ?? 0.2,
+            ...(system ? { system } : {}),
+            messages: chat,
+            tools,
+          }),
+          timeoutMs,
+          "anthropic",
+        );
       } catch (err: unknown) {
+        if (err instanceof ProviderError) throw err;
         const apiErr = err as { status?: number; message?: string };
         const retryable = apiErr.status === 429 || apiErr.status === 529 || apiErr.status === 500;
         throw new ProviderError(

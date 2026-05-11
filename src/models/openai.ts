@@ -4,6 +4,7 @@ import type { ChatMessage, CompletionOptions, ProviderName } from "../core/types
 import type { ProviderResponse, ToolCall } from "../tools/types.js";
 import { ProviderError } from "../core/errors.js";
 import { retryWithBackoff } from "./retry.js";
+import { withTimeout, resolveApiTimeoutMs } from "./timeout.js";
 import { log } from "../core/logger.js";
 
 const DEFAULT_MODEL = "gpt-4o";
@@ -21,18 +22,24 @@ export class OpenAIProvider implements ModelProvider {
       ? [{ role: "system", content: opts.systemPrompt }, ...messages.filter((m) => m.role !== "system")]
       : messages;
 
+    const timeoutMs = resolveApiTimeoutMs();
     const res = await retryWithBackoff(async () => {
       try {
-        return await this.client.chat.completions.create({
-          model: opts.model ?? DEFAULT_MODEL,
-          temperature: opts.temperature ?? 0.4,
-          max_tokens: opts.maxTokens ?? 4096,
-          messages: withSystem.map((m) => ({
-            role: m.role,
-            content: m.content,
-          })),
-        });
+        return await withTimeout(
+          this.client.chat.completions.create({
+            model: opts.model ?? DEFAULT_MODEL,
+            temperature: opts.temperature ?? 0.4,
+            max_tokens: opts.maxTokens ?? 4096,
+            messages: withSystem.map((m) => ({
+              role: m.role,
+              content: m.content,
+            })),
+          }),
+          timeoutMs,
+          "openai",
+        );
       } catch (err: unknown) {
+        if (err instanceof ProviderError) throw err;
         const apiErr = err as { status?: number; message?: string };
         const retryable = apiErr.status === 429 || apiErr.status === 500;
         throw new ProviderError(
@@ -84,16 +91,22 @@ export class OpenAIProvider implements ModelProvider {
       },
     }));
 
+    const timeoutMs = resolveApiTimeoutMs();
     const res = await retryWithBackoff(async () => {
       try {
-        return await this.client.chat.completions.create({
-          model: opts.model ?? DEFAULT_MODEL,
-          temperature: opts.temperature ?? 0.2,
-          max_tokens: opts.maxTokens ?? 4096,
-          messages: withSystem.map((m) => ({ role: m.role, content: m.content })),
-          tools,
-        });
+        return await withTimeout(
+          this.client.chat.completions.create({
+            model: opts.model ?? DEFAULT_MODEL,
+            temperature: opts.temperature ?? 0.2,
+            max_tokens: opts.maxTokens ?? 4096,
+            messages: withSystem.map((m) => ({ role: m.role, content: m.content })),
+            tools,
+          }),
+          timeoutMs,
+          "openai",
+        );
       } catch (err: unknown) {
+        if (err instanceof ProviderError) throw err;
         const apiErr = err as { status?: number; message?: string };
         const retryable = apiErr.status === 429 || apiErr.status === 500;
         throw new ProviderError(

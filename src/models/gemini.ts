@@ -3,6 +3,7 @@ import type { ModelProvider } from "./index.js";
 import type { ChatMessage, CompletionOptions, ProviderName } from "../core/types.js";
 import { ProviderError } from "../core/errors.js";
 import { retryWithBackoff } from "./retry.js";
+import { withTimeout, resolveApiTimeoutMs } from "./timeout.js";
 import { log } from "../core/logger.js";
 
 const DEFAULT_MODEL = "gemini-1.5-pro";
@@ -39,11 +40,17 @@ export class GeminiProvider implements ModelProvider {
         parts: [{ text: m.content }],
       }));
 
+    const timeoutMs = resolveApiTimeoutMs();
     return await retryWithBackoff(async () => {
       try {
-        const res = await model.generateContent({ contents });
+        const res = await withTimeout(
+          model.generateContent({ contents }),
+          timeoutMs,
+          "gemini",
+        );
         return res.response.text().trim();
       } catch (err: unknown) {
+        if (err instanceof ProviderError) throw err;
         const apiErr = err as { status?: number; message?: string };
         const retryable = apiErr.status === 429 || apiErr.status === 500;
         throw new ProviderError(

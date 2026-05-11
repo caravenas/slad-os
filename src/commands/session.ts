@@ -17,8 +17,11 @@ import { log } from "../core/logger.js";
 import { SladError } from "../core/errors.js";
 import { collectAnswers } from "../core/hitl.js";
 import { computePathHash, discoverCliCandidates } from "../models/cli-discovery.js";
-import { DiscoveryResult, type DiscoveryResult as DiscoveryResultType } from "../core/types.js";
+import type { DiscoveryResult as DiscoveryResultType } from "../core/types.js";
 import { createBootUi, type BootUiOptions } from "../cli/ui.js";
+import { artifactDirSync } from "../persistence/layout.js";
+import { stringifyYaml } from "../persistence/yaml.js";
+import { parseCliDiscoveryArtifact } from "../persistence/parse/session.js";
 
 type SessionStartDeps = {
   bootUiFactory?: (opts: BootUiOptions) => ReturnType<typeof createBootUi>;
@@ -62,15 +65,34 @@ function isStrictPathDiscoveryEnabled(): boolean {
 }
 
 function discoveryArtifactPath(sessionId: string): string {
-  return path.join(process.cwd(), "sessions", sessionId, "artifacts", "cli-discovery.json");
+  return path.join(artifactDirSync("session"), `${sessionId}_cli-discovery.md`);
+}
+
+function renderDiscoveryArtifact(
+  sessionId: string,
+  discovery: DiscoveryResultType,
+): string {
+  const frontmatter = {
+    kind: "cli-discovery",
+    schemaVersion: 1,
+    sessionId,
+    createdAt: new Date().toISOString(),
+    discovery,
+  };
+  return [
+    "---",
+    stringifyYaml(frontmatter).trimEnd(),
+    "---",
+    "",
+    `# CLI Discovery ${sessionId}`,
+    "",
+  ].join("\n");
 }
 
 function readDiscoveryArtifact(filePath: string): DiscoveryResultType | null {
   if (!fs.existsSync(filePath)) return null;
   try {
-    const raw = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    const parsed = DiscoveryResult.safeParse(raw);
-    return parsed.success ? parsed.data : null;
+    return parseCliDiscoveryArtifact(fs.readFileSync(filePath, "utf8"), filePath);
   } catch {
     return null;
   }
@@ -273,7 +295,7 @@ export async function sessionStartCommand(
 
     bootUi.milestone("fs", "Preparando filesystem de sesión...");
     fs.mkdirSync(path.dirname(artifactPath), { recursive: true });
-    fs.writeFileSync(artifactPath, JSON.stringify(discovery, null, 2) + "\n", "utf8");
+    fs.writeFileSync(artifactPath, renderDiscoveryArtifact(session.id, discovery), "utf8");
 
     bootUi.milestone("persistence", "Persistiendo estado de sesión...");
     updatedSession = upsertArtifact(updatedSession, "cli-discovery", artifactPath);

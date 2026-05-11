@@ -6,8 +6,9 @@ import type { ModelProvider } from "./index.js";
 import { getActiveSession } from "../core/session.js";
 import { parseCliDiscoveryAnswer } from "../core/config.js";
 import { log } from "../core/logger.js";
-import { DiscoveryResult, type ChatMessage, type CompletionOptions, type DiscoveryResult as DiscoveryResultType, type ProviderName } from "../core/types.js";
+import { type ChatMessage, type CompletionOptions, type DiscoveryResult as DiscoveryResultType, type ProviderName } from "../core/types.js";
 import { CliFallbackError, ProviderError } from "../core/errors.js";
+import { parseCliDiscoveryArtifact } from "../persistence/parse/session.js";
 
 const DEFAULT_TIMEOUT_MS = 1_800_000;
 const API_KEY_ENV_NAMES = [
@@ -114,7 +115,7 @@ const codexAdapter: CliAdapter = {
   defaultArgs: () => ["exec", "--skip-git-repo-check", "--color", "never"],
   defaultPromptMode: () => "stdin",
   supportsPromptMode: (mode) => mode === "stdin" || mode === "arg",
-  shouldProbeRuntimeCapability: () => false,
+  shouldProbeRuntimeCapability: () => true,
   modelArg: () => "--model",
   shouldCaptureLastMessageToFile: () => true,
   normalizeOutput: ({ outputFromFile, stdout }) => (outputFromFile || stdout).trim(),
@@ -164,6 +165,8 @@ const geminiAdapter: CliAdapter = {
 type RuntimeCapability = {
   supportsStdin: boolean;
   supportsArg: boolean;
+  /** Whether the binary supports the --output-last-message <file> flag (codex-specific). */
+  supportsOutputLastMessage: boolean;
 };
 
 const runtimeCapabilityCache = new Map<string, RuntimeCapability>();
@@ -183,7 +186,8 @@ function detectRuntimeCapabilityFromTexts(binary: string, helpText: string, vers
   const combined = `${helpText}\n${versionText}`.toLowerCase();
   const supportsStdin = /stdin|read from standard input|from stdin|\b-\b/.test(combined);
   const supportsArg = /prompt|message|text|<prompt>|input/.test(combined) || binaryName(binary) === "claude";
-  return { supportsStdin, supportsArg };
+  const supportsOutputLastMessage = /output-last-message/.test(combined);
+  return { supportsStdin, supportsArg, supportsOutputLastMessage };
 }
 
 function detectRuntimeCapability(binary: string): RuntimeCapability {
@@ -192,7 +196,7 @@ function detectRuntimeCapability(binary: string): RuntimeCapability {
 
   // Negative path: si el binario no existe o no responde, usamos defaults conservadores.
   if (!commandExists(binary)) {
-    const conservative = { supportsStdin: false, supportsArg: true };
+    const conservative = { supportsStdin: false, supportsArg: true, supportsOutputLastMessage: false };
     runtimeCapabilityCache.set(binary, conservative);
     return conservative;
   }
@@ -522,9 +526,7 @@ export class CLIProvider implements ModelProvider {
       [...session.artifacts].reverse().find((entry) => entry.kind === "cli-discovery")?.path ?? null;
     if (!artifactPath || !fs.existsSync(artifactPath)) return null;
     try {
-      const raw = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
-      const parsed = DiscoveryResult.safeParse(raw);
-      return parsed.success ? parsed.data : null;
+      return parseCliDiscoveryArtifact(fs.readFileSync(artifactPath, "utf8"), artifactPath);
     } catch {
       return null;
     }
@@ -590,6 +592,8 @@ export class CLIProvider implements ModelProvider {
     const preferredMode = this.configuredPromptMode ?? defaultMode;
     let promptMode = adapter.supportsPromptMode(preferredMode) ? preferredMode : defaultMode;
 
+    let captureLastMessageToFile = adapter.shouldCaptureLastMessageToFile();
+
     if (adapter.shouldProbeRuntimeCapability()) {
       const capability = detectRuntimeCapability(binary);
       if (promptMode === "stdin" && !capability.supportsStdin && capability.supportsArg) {
@@ -597,6 +601,12 @@ export class CLIProvider implements ModelProvider {
       }
       if (this.configuredPromptMode === null && promptMode === defaultMode && defaultMode !== "stdin" && capability.supportsStdin) {
         promptMode = "stdin";
+      }
+      // If the adapter wants --output-last-message but the binary doesn't support it,
+      // fall back to stdout capture (normalizeOutput already handles this via the || stdout fallback).
+      if (captureLastMessageToFile && !capability.supportsOutputLastMessage) {
+        log.debug(`cli · ${binary} no soporta --output-last-message, usando stdout`);
+        captureLastMessageToFile = false;
       }
     }
 
@@ -606,6 +616,7 @@ export class CLIProvider implements ModelProvider {
       binary,
       model: model ?? "",
       hasDiscovery: Boolean(this.discovery),
+      captureLastMessageToFile,
     });
 
     return {
@@ -614,7 +625,7 @@ export class CLIProvider implements ModelProvider {
       args,
       promptMode,
       modelArg,
-      captureLastMessageToFile: adapter.shouldCaptureLastMessageToFile(),
+      captureLastMessageToFile,
     };
   }
 

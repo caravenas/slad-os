@@ -12,9 +12,10 @@ import type { BudgetTracker } from "../context/budget.js";
 import { collectAnswers, formatAnswersForPrompt, printHitlHeader } from "../core/hitl.js";
 import { projectContextBlock } from "../core/context.js";
 import { log } from "../core/logger.js";
-import { SchemaError, SladError, isRetryable } from "../core/errors.js";
-import { writeArtifact } from "../persistence/index.js";
+import { ProviderError, SchemaError, SladError, isRetryable } from "../core/errors.js";
+import { readArtifact, writeArtifact } from "../persistence/index.js";
 import { parseRun } from "../persistence/parse/run.js";
+import { getDocsRoot } from "../persistence/layout.js";
 import { createHarness } from "../harness/index.js";
 import { loadHarnessConfig } from "../harness/config.js";
 import type { ExecutionHarness } from "../harness/types.js";
@@ -96,10 +97,13 @@ function warnDeprecatedOutput(outputPath: string): void {
   log.dim("  Usa SLAD_DOCS_PATH o .slad-os/config.json para cambiar docsRoot, o --json para stdout.");
 }
 
-function readPlan(planInput: string | undefined): ReturnType<typeof PlanOutput.parse> {
+async function readPlan(planInput: string | undefined): Promise<ReturnType<typeof PlanOutput.parse>> {
   const planPath = path.resolve(planInput ?? path.join(process.cwd(), "tasks", "tasks.json"));
   if (!fs.existsSync(planPath)) {
     throw new Error(`No existe el archivo de tasks: ${planPath}`);
+  }
+  if (planPath.endsWith(".md")) {
+    return (await readArtifact("plan", planPath)).value;
   }
   const raw = JSON.parse(fs.readFileSync(planPath, "utf8"));
   return PlanOutput.parse(raw);
@@ -686,9 +690,25 @@ export async function runAutoLoop(
   };
 
   const autoReport = { planSnapshot: plan.snapshot, startedAt, completedAt, durationMs, summary, taskReports };
-  const autoPath = path.join(process.cwd(), "runs", `${timestamp()}-auto.json`);
+  const autoPath = path.join(await getDocsRoot(), "log", "auto", `${timestamp()}-auto.md`);
   fs.mkdirSync(path.dirname(autoPath), { recursive: true });
-  fs.writeFileSync(autoPath, JSON.stringify(autoReport, null, 2) + "\n", "utf8");
+  fs.writeFileSync(
+    autoPath,
+    [
+      "---",
+      "kind: auto-report",
+      "schemaVersion: 1",
+      "---",
+      "",
+      "# Auto Run Report",
+      "",
+      "```json",
+      JSON.stringify(autoReport, null, 2),
+      "```",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
 
   printAutoSummary(summary, durationMs, executions >= maxTasks);
   log.success(`Reporte guardado en ${autoPath}`);
@@ -824,7 +844,7 @@ export async function runCommand(opts: RunOpts): Promise<void> {
 
   let plan: ReturnType<typeof PlanOutput.parse>;
   try {
-    plan = readPlan(planInput);
+    plan = await readPlan(planInput);
   } catch (err) {
     log.error((err as Error).message);
     process.exit(1);
@@ -832,6 +852,26 @@ export async function runCommand(opts: RunOpts): Promise<void> {
 
   const model = opts.model ?? getModel(providerName);
   const provider = await getProvider(providerName, apiKey ?? undefined);
+
+  // ── Fail-fast: provider must be able to write files (or user opted out) ──
+  // Direct providers (anthropic/openai/gemini) need supportsToolUse to apply
+  // file changes. The `cli` provider is exempt because the binary it spawns
+  // (codex/claude) runs its own agentic loop with filesystem access.
+  // NOTE: `cli` + `gemini` binary still cannot write files — that case is
+  // tracked in docs/plan-gemini-tool-use.md and warm-fails via HITL today.
+  if (opts.tools !== false && providerName !== "cli" && !provider.supportsToolUse) {
+    throw new ProviderError(
+      `El provider "${providerName}" no soporta tool use, así que el Builder no podría escribir archivos. ` +
+      `Usá uno de:\n` +
+      `  · --provider anthropic  (requiere ANTHROPIC_API_KEY)\n` +
+      `  · --provider openai     (requiere OPENAI_API_KEY)\n` +
+      `  · --agent codex         (requiere binario codex local)\n` +
+      `  · --agent claude        (requiere binario claude local)\n` +
+      `O pasá --no-tools si querés un run sin escritura (el Builder pedirá aplicación manual via HITL).`,
+      providerName,
+      { retryable: false },
+    );
+  }
 
   log.title(`Run · ${providerName}${model ? ` · ${model}` : ""}`);
 

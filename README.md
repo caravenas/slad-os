@@ -2,8 +2,17 @@
 
 CLI de **SLAD OS** — Spec-Light Agentic Dev OS.
 
-Convierte intención en Snapshots y orquesta agentes especializados sobre múltiples
-providers de LLM (Claude, OpenAI, Gemini o un binario local vía CLI como Codex/Claude Code).
+Un **pipeline tipado** para coding agents. Cada intención atraviesa stages auditables —
+`explore → snapshot → plan → run → learn → evolve` — y produce artefactos JSON
+validados por Zod que el siguiente stage consume como input.
+
+No es un runner de agentes en paralelo. Es lo opuesto: **profundidad, no throughput.**
+Un task estructurado y verificable — con HITL nativo, cache content-based, y un loop de
+aprendizaje (`learn` + `evolve`) que destila decisiones del run a la wiki del proyecto.
+
+Provider-agnostic: Claude, OpenAI, Gemini o un binario local (Codex / Claude Code)
+detrás de la misma interfaz `ModelProvider`. Cambiar de proveedor es un flag de CLI,
+no una reescritura.
 
 Primera versión (`0.1.0`): comandos `explore`, `snapshot`, `plan`, `run`, `learn` y `evolve`.
 
@@ -11,7 +20,7 @@ Primera versión (`0.1.0`): comandos `explore`, `snapshot`, `plan`, `run`, `lear
 
 ## ¿Qué es?
 
-Es un **orquestador de agentes de IA para desarrollo de software**, operado desde la terminal. La idea central: en vez de hablar directamente con un LLM y construir prompts a mano, `slad` define un pipeline estructurado donde cada paso tiene un agente especializado con un schema de salida validado.
+SLAD OS es un **pipeline estructurado para coding agents**, operado desde la terminal. Cada stage es un agente especializado con un schema de salida validado por Zod, y el output de uno se convierte en input tipado del siguiente. En vez de hablar directamente con un LLM y construir prompts a mano, modelas la intención como un artefacto que atraviesa transformaciones verificables.
 
 El flujo completo es:
 
@@ -31,6 +40,32 @@ Cada comando produce un artefacto JSON concreto que el siguiente consume. Todo q
 | **Builder/Reviewer** | Ejecuta cada tarea y la revisa en el mismo loop |
 | **Learn** | Destila decisiones, errores y patrones del run en la wiki |
 | **Evolve** | Propone actualizaciones a los patrones del proyecto |
+
+### ¿En qué se diferencia de Conductor y otros runners de agentes paralelos?
+
+Hay una nueva ola de tooling para coding agents (Conductor, multi-agent IDEs, etc.)
+que comparte la palabra "orquestar" pero resuelve un problema **distinto**.
+SLAD OS no compite con esas herramientas — opera en otra dimensión.
+
+| Eje | Runners paralelos (Conductor, etc.) | SLAD OS |
+|-----|-------------------------------------|---------|
+| **Topología** | Horizontal: N agentes en paralelo, cada uno en su worktree | Vertical: un task atraviesa stages tipados secuencialmente |
+| **Unidad de trabajo** | Tarea → agente → diff → PR | Intención → stages → artefactos JSON validados |
+| **Estado** | Worktrees + diffs en disco | `SessionState` + Zod schemas + `docs/log/` inspeccionable |
+| **Foco** | Throughput (lanzar más tareas a la vez) | Calidad y auditabilidad (cada decisión queda externalizada) |
+| **HITL** | Review final del PR | Pausa/pregunta en cualquier stage; respuestas inyectadas en los siguientes |
+| **Learning loop** | No | `learn` + `evolve` destilan patrones del run a la wiki del proyecto |
+| **Provider** | Wraps Claude Code / Codex como agentes | Abstrae Anthropic / OpenAI / Gemini / binario local detrás de `ModelProvider` |
+| **Forma** | App GUI (típicamente macOS) | CLI cross-platform |
+
+**No compiten — se componen.** Cada agente que un runner paralelo dispara podría
+ejecutar una pipeline SLAD por dentro: el runner aporta aislamiento por worktree,
+SLAD aporta verificación tipada y aprendizaje stage-a-stage.
+
+Heurística rápida:
+
+- *"Quiero lanzar 5 tareas a 5 agentes a la vez sin que se pisen"* → un runner paralelo.
+- *"Quiero que cada tarea produzca artefactos estructurados, auditables, y que el sistema aprenda del run"* → SLAD OS.
 
 ### Ventajas del modelo Spec-Light
 
@@ -53,7 +88,7 @@ La interfaz `ModelProvider` desacopla completamente la lógica de negocio del ve
 Las salidas de los agentes se cachean por contenido (hash del snapshot + inputs + versión del prompt). Si no cambió nada, no gasta tokens.
 
 **Decisiones inspeccionables.**
-La mayoría de los flujos con agentes son una caja negra. `slad` hace lo opuesto: cada decisión queda externalizada en un artefacto concreto. Puedes revisar el `explore.json` antes de generar el spec, el spec antes de planificar, el `tasks.json` antes de ejecutar. El humano está en el loop en los puntos que importan, no monitoreando un proceso opaco.
+La mayoría de los flujos con agentes son una caja negra. `slad` hace lo opuesto: cada decisión queda externalizada en un artefacto Markdown+YAML bajo `docs/log/`. Puedes revisar el explore antes de generar el spec, el plan antes de ejecutar, y cada run antes de aprender de él. El humano está en el loop en los puntos que importan, no monitoreando un proceso opaco.
 
 ---
 
@@ -303,7 +338,7 @@ slad session use <session-id>                               # activa una sesión
 slad session show                                           # detalle de la sesión activa
 ```
 
-La sesión activa se persiste en `.slad-session` (cwd). Todos los comandos sin
+La sesión activa se persiste en `docs/log/sessions/.active-session`. Todos los comandos sin
 `--skip-session` leen y actualizan esa sesión automáticamente.
 
 ### `slad explore`
@@ -317,49 +352,51 @@ slad explore "..." --agent codex
 slad explore "..." --agent codex --model gpt-5.4
 slad explore "..." --agent claude
 slad explore "..." --provider openai
-slad explore "..." --output ./out/explore.json --json
+slad explore "..." --json
 ```
+
+Output por defecto en sesión: `<docsRoot>/log/explores/<sessionId>.md`.
 
 ### `slad snapshot`
 
 Genera un Snapshot Markdown (mini-spec de 1 página) a partir de:
-- un `explore.json` previo (flujo recomendado), o
+- un artifact `explore.md` previo (flujo recomendado), o
 - una intención suelta.
 
 ```bash
 # Flujo completo:
-slad explore "memoria por proyecto" --agent codex --output ./out/explore.json
-slad snapshot --input ./out/explore.json --approach "vector"
+slad explore "memoria por proyecto" --agent codex
+slad snapshot --approach "vector"
 
 # Atajo:
 slad snapshot --intent "memoria por proyecto" --agent codex
 ```
 
-Output por defecto: `./snapshots/<fecha>-<slug>.md`.
+Output por defecto: `<docsRoot>/log/snapshots/<sessionId>.md`.
 
 ### `slad plan`
 
-Convierte un Snapshot en `tasks.json`: tareas atómicas, dependencias, archivos
+Convierte un Snapshot en un `plan.md`: tareas atómicas, dependencias, archivos
 probables, criterios de aceptación y checks de verificación.
 
 ```bash
-slad plan --input ./snapshots/2026-04-22-como-implementar-un-subprocess-model.md
-slad plan --input ./snapshots/feature.md --agent codex --output ./tasks/tasks.json
-slad plan --input ./snapshots/feature.md --json
+slad plan
+slad plan --input ./docs/log/snapshots/<sessionId>.md --agent codex
+slad plan --input ./docs/log/snapshots/<sessionId>.md --json
 ```
 
-Output por defecto: `./tasks/tasks.json`.
+Output por defecto: `<docsRoot>/log/plans/<sessionId>.md`.
 
 ### `slad run`
 
-Ejecuta una tarea de `tasks.json` con el loop Builder + Reviewer y guarda un
+Ejecuta una tarea de un `plan.md` con el loop Builder + Reviewer y guarda un
 reporte Markdown con YAML frontmatter en `<docsRoot>/log/runs/`. Si no pasás
 `--task`, usa `recommendedFirstTask`.
 
 ```bash
 slad run
 slad run --task T3
-slad run --agent codex --input ./tasks/tasks.json --task T1
+slad run --agent codex --input ./docs/log/plans/<sessionId>.md --task T1
 SLAD_DOCS_PATH=/tmp/slad-docs slad run --agent codex --task T1
 slad run --agent codex --task T1 --json
 ```
@@ -399,23 +436,22 @@ patrones, preguntas abiertas y follow-ups.
 ```bash
 slad learn
 slad learn --agent codex --input ./docs/log/runs/<sessionId>_T1.md
-slad learn --agent codex --input ./docs/log/runs/<sessionId>_T1.md --output ./learnings/T1.md
+slad learn --agent codex --input ./docs/log/runs/<sessionId>_T1.md --json
 ```
 
-Output por defecto: `./learnings/<timestamp>-<task>.md`.
+Output por defecto: `<docsRoot>/log/learnings/<sessionId>_<taskId>.md`.
 
 ### `slad evolve`
 
-Revisa artefactos recientes (`snapshots/`, `tasks/`, `learnings/` y reportes legacy en `runs/`) y
+Revisa artefactos recientes bajo `docs/log/` y
 propone actualizaciones para wiki/patrones.
 
 ```bash
 slad evolve --agent codex
-slad evolve --agent codex --output ./evolution/subprocess-model.md
 slad evolve --agent codex --apply-wiki
 ```
 
-Output por defecto: `./evolution/<timestamp>-evolve.md`. Con `--apply-wiki`,
+Output por defecto: `<docsRoot>/log/evolution/<sessionId>.md`. Con `--apply-wiki`,
 hace append en `$SLAD_WIKI_PATH/slad-os-evolution.md`.
 
 ## Arquitectura
@@ -453,111 +489,31 @@ y las respuestas HITL se acumulan para inyectarse en los pasos siguientes.
 
 ## Roadmap
 
-### Estado actual por fase (repo real)
-
-| Fase | Completado | Falta | Prioridad | Próximo entregable |
-|------|------------|-------|-----------|--------------------|
-| **Fase 1 — Pipeline tipado base** | Stages `explore` → `snapshot` → `plan` → `run` → `learn` → `evolve` implementados como comandos de Commander; schemas Zod en `core/types.ts` (`ExploreOutput`, `PlanTask`, `RunOutput`, etc.); JSON extraction fence-aware vía `extractJson()`; tests unitarios para `plan`, `explore`, `chat`. | Tests de integración para `learn` y `evolve`; suite E2E que valide el pipeline completo sobre un repo sintético reproducible; smoke test del binario `slad`. | Alta | Suite E2E con fixture de repo controlado que ejecute `explore → run` y valide artefactos en `SessionState`. |
-| **Fase 2 — Multi-provider** | `ModelProvider` interface + factory; providers `anthropic`, `openai`, `gemini`, `cli` (codex/claude vía subprocess); resolución por `.env` y CLI flags; `ProviderError` con flag `retryable` (429/529/500). | Backoff exponencial configurable; fallback automático provider-to-provider; token accounting + cost tracking por sesión; soporte streaming para feedback en vivo. | Alta | Token accounting + fallback automático cuando el provider primario devuelve 5xx/429. |
-| **Fase 3 — Sesiones y HITL** | `SessionState` CRUD con `appendArtifact()`; loop HITL `awaiting_human` + `questions[]` con `@inquirer/prompts`; `AGENTS.md` injection vía `core/context.ts`; `core/inventory.ts` para describir proyecto. | Persistencia robusta multi-proceso; resumibilidad cross-session (`session restore`); diff entre sesiones; branch/fork de sesión para experimentación. | Alta | Comando `session restore <id>` + `session diff` para comparar runs. |
-| **Fase 4 — Cache & observabilidad** | Cache content-based en `~/.slad-os/cache/v1` (`store.ts`, `keys.ts`, `invalidation.ts`, `reusable.ts`) con tests; logger configurable (`SLAD_LOG_LEVEL`, `SLAD_DEBUG`); `project-id` determinista. | Métricas de hit rate; instrumentación OTEL; correlation IDs cross-stage; dashboard CLI/web para visualizar runs; export de trazas. | Media | Métricas básicas (cache hit, latencia por stage, tokens) emitidas en formato consumible. |
-| **Fase 5 — Harness de seguridad** | Clasificador `low/med/high` (`classifier.ts`); `AuditLogger` LDJSON append-only (`audit.ts`); `approval.ts` HITL; modes `off` / `on` / `strict` vía flag `--harness`; loader `.slad-os/harness.json`. | Sandboxing real (no solo aprobación HITL); DSL de políticas declarativas; allowlist/blocklist por proyecto; integración con `firejail` o contenedores; tests de evasión. | Alta | Sandbox de ejecución (docker o `firejail`) + DSL de políticas en `harness.json`. |
-| **Fase 6 — Evals de calidad** | Tests unitarios con `node:test` en cache, harness, core, commands, project, cli; template de snapshot. | Golden outputs por stage; métricas de calidad (`plan_completeness`, `run_success_rate`, schema_pass_rate); regression suite; benchmark dataset reproducible; baseline contra el cual comparar runs. | Crítica | Benchmark dataset + script de evals reproducible con baseline versionado. |
-| **Fase 7 — Distribución y producto** | Build TS a `dist/`; `prepublishOnly` con typecheck; `bin/slad-os.js`; package listo en `npm` (no publicado aún). | CI/CD (GitHub Actions: typecheck + test + build matrix); changelog automatizado (changesets); README robusto; docs site; primera release en `npm`. | Alta | Pipeline CI/CD + primera release pública `slad-os@0.1.0` en npm + docs site. |
-| **Fase 8 — Extensibilidad** | Estructura modular por carpetas (`agents/`, `commands/`, `models/`, `harness/`) con interfaces claras. | API de plugins para custom agents/commands; hooks pre/post stage; registry de skills; soporte para lenguajes adicionales (no solo TS). | Media (post-MVP) | API de plugins documentada + un plugin de referencia (e.g. `slad-plugin-python`). |
+Roadmap detallado con estado por fase, production blockers y priorización: [`roadmap.md`](roadmap.md).
 
 ### Features implementadas
 
-- [x] `explore` — Explorer Agent con output estructurado
-- [x] `snapshot` — generador de mini-spec
-- [x] `plan` — Planner Agent → `tasks.json`
-- [x] `run` — Builder + Reviewer loop
-- [x] `run --auto` — auto-loop con DAG topológico y resume detection
-- [x] `learn` — captura decisiones en la wiki
-- [x] `evolve` — actualiza la wiki automáticamente
+- [x] Pipeline completo: `explore` → `snapshot` → `plan` → `run` → `learn` → `evolve`
+- [x] `auto` — pipeline intent→código en un comando con budget, scratchpad y auto-resolve HITL
 - [x] `chat` — REPL conversacional con sugerencias de siguiente paso
 - [x] `session` — gestión de sesiones multi-artefacto con contexto persistente
-- [x] HITL universal — todos los agentes pueden pausar y pedir input al humano
+- [x] `stats` — totales de sesiones, runs y learnings
+- [x] HITL universal — todos los agentes pausan y piden input; auto-resolve en modo auto
+- [x] Tool use real — readFile, writeFile, listDir, grep, exec, git ops vía tool-loop genérico
+- [x] Scratchpad — offloading de tool results grandes a disco con summary en context
+- [x] Budget tracker — token/cost tracking por stage y modelo con warnings y abort
 - [x] Git change detection — muestra archivos modificados por cada tarea
-- [ ] Indexación dinámica del codebase — inyectar archivos relevantes por tarea automáticamente (sin `AGENTS.md` manual)
+- [x] Resume detection — `run --auto` detecta tasks completadas y ofrece resumir
+- [x] Follow-up execution — ejecución de follow-ups sugeridos por el agente
+- [x] Harness de seguridad — clasificador, audit log, approval, 3 modes
+- [x] Persistence layer — Markdown+YAML frontmatter con renderers/parsers por tipo
+- [x] Multi-provider — Anthropic, OpenAI, Gemini, CLI (Codex/Claude) con tool use
+- [x] CLI discovery — detección automática de binarios locales con cache
+- [x] Cache content-based — store, keys, invalidation, reusable API
+- [x] `--dry-run` en auto — explore+snapshot+plan sin ejecutar código
+- [ ] Indexación dinámica del codebase
 - [ ] MCP server expose (para Claude Code / Cursor)
+- [ ] UI Desktop (brief listo en `docs/ui-prototype-brief.md`)
+- [ ] Plugin system
 - [ ] Evals por agente
-
-### Harness Engineering (v0.3)
-
-Inspirado en el paradigma de _Harness Engineering_ (OpenAI Symphony): convertir
-el pipeline en una "fábrica" reproducible donde cada sesión corre aislada, el
-entorno se levanta de forma determinista, y la verificación produce evidencia
-inspeccionable sin clonar el repo.
-
-**Tier 1 — cimientos del harness**
-
-- [ ] **Git Worktrees** — aislamiento por sesión para ejecución paralela del Builder sin colisiones de estado
-- [ ] **Bootability stage** — detección determinista de scripts de setup, env vars y dependencias antes del `run`
-- [ ] **Playwright CRI verifier** — evidencia visual (video/screenshots) como artefacto del Reviewer, sin overhead de MCP
-
-**Tier 2 — extensiones cuando Tier 1 esté maduro**
-
-- [ ] **Ticket-driven mode** — trigger del pipeline desde transiciones de estado en Linear / GitHub Issues
-- [ ] **`workflow.mmd` export** — diagrama Mermaid renderizable del pipeline configurado por proyecto
-- [ ] **Observability ContextProvider** — inyección de logs/métricas reales (Grafana/Datadog/Sentry) como contexto del Explorer
-
-Plan de implementación detallado: [`docs/implementation-plan-harness-engineering.md`](docs/implementation-plan-harness-engineering.md).
-
-## Pasos hacia un MVP productivo
-
-Más allá de las fases 1-7, hay un set de _production blockers_ que típicamente no aparecen en un roadmap funcional pero son los que separan un proyecto interesante de uno usable por terceros.
-
-### A. Confiabilidad
-
-1. **Determinismo y reproducibilidad** — fijar `temperature: 0` por defecto en stages críticos (`plan`, `run`), seed configurable, snapshots de prompts versionados.
-2. **Idempotencia del pipeline** — si re-ejecutas un stage con los mismos inputs, debe producir el mismo output (vía cache content-based, ya parcialmente resuelto).
-3. **Manejo de fallos parciales** — si `run` falla a mitad de pipeline, poder reanudar desde donde se quedó sin re-ejecutar stages anteriores.
-4. **Timeouts y circuit breakers** — cap por stage (e.g. `plan` no puede tomar > 5 min), límite global por sesión.
-
-### B. Costos y consumo
-
-5. **Budget caps** — `slad --budget=$5` aborta la sesión si supera el límite; warning al 80%.
-6. **Token telemetry persistente** — log de tokens por stage / provider / model para análisis de cost-per-task.
-7. **Cache aggressiveness configurable** — `--cache=strict|loose|off` para balancear costo vs. frescura.
-
-### C. Observabilidad
-
-8. **Trazas estructuradas** — cada stage emite span con metadata (provider, model, tokens, duration, cache_hit). Compatible con OTEL para enviar a Honeycomb/Datadog.
-9. **Replay de sesiones** — `slad session replay <id>` re-renderiza un run pasado paso a paso (útil para debugging y demos).
-10. **Modo `--explain`** — imprime decisiones del orquestador (por qué eligió tal provider, por qué invalidó cache, por qué activó el harness).
-
-### D. Seguridad
-
-11. **Secret scanning en context** — antes de mandar contexto al LLM, escanear por secretos (API keys, passwords) y redactarlos.
-12. **Sandboxing real del harness** — comandos `high` siempre corren en contenedor o `firejail`, sin acceso a `~/.ssh`, `~/.aws`, etc.
-13. **Audit log inmutable** — opcional: append-only con hash chaining (cada entry referencia hash del anterior) para detectar tampering.
-
-### E. UX y DX
-
-14. **Quickstart en < 60 segundos** — `npx slad-os explore "fix bug X"` debe funcionar sin setup más allá de un `.env`.
-15. **Mensajes de error accionables** — si `ANTHROPIC_API_KEY` falta, el error debe decir exactamente qué archivo crear y qué línea agregar.
-16. **Modo `--dry-run`** — simula el pipeline sin llamar a LLMs (útil para CI y para ver qué prompts se enviarían).
-
-### F. Distribución
-
-17. **CI/CD GitHub Actions** — matrix de Node 20/22 × macOS/Linux/Windows; release automática en tag.
-18. **Changelog automatizado** — `changesets` para semver disciplinado.
-19. **Plugin/extension manifest** — formato estable para que terceros publiquen `slad-plugin-*` en npm.
-
-### G. Validación con usuarios reales
-
-20. **Beta cerrada con 3-5 power users** — validar sobre repos reales de los usuarios, no fixtures sintéticos.
-21. **Feedback loop estructurado** — comando `slad feedback <session_id>` que envía (con consent) el run a un endpoint para análisis.
-
-### Sugerencia de priorización
-
-Si el objetivo es **lanzar un MVP público en npm** que genere tracción:
-
-**Bloque crítico (semanas 1-3):** Fase 1 (E2E tests), Fase 7 (CI/CD + primera release), pasos A.1 / A.2 / A.3 (determinismo + reanudación), paso E.14 (quickstart).
-
-**Bloque de confianza (semanas 4-6):** Fase 6 (evals con baseline), Fase 5 completar (sandboxing real), pasos B.5 (budget) y C.8 (trazas estructuradas).
-
-**Post-MVP (mes 2+):** Fase 8 (plugins), pasos C.9 (replay) y G.20 (beta cerrada).
-
-Las **Fases 2, 3, 4** se pueden completar incrementalmente en paralelo según dolor real de uso.
+- [ ] CI/CD + npm publish

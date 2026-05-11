@@ -25,9 +25,12 @@ import {
   SNAPSHOT_SYSTEM,
   PLANNER_SYSTEM,
 } from "../agents/prompts.js";
-import { ExploreOutput, SnapshotOutput, PlanOutput } from "../core/types.js";
+import { ProviderError } from "../core/errors.js";
+import { ExploreOutput, SnapshotOutput, PlanOutput, LearnOutput } from "../core/types.js";
 import { readWikiContextCached } from "../agents/explorer.js";
 import { projectContextBlock } from "../core/context.js";
+import { getDocsRoot, listRunsDir } from "../persistence/layout.js";
+import { writeArtifact } from "../persistence/index.js";
 
 export interface AutoOpts {
   provider?: string;
@@ -71,24 +74,45 @@ function extractJson(raw: string): string {
   return body.slice(first, last + 1).trim();
 }
 
-function stageOutputDir(stage: string): string {
+async function saveStageArtifact(
+  stage: Exclude<PipelineStage, "run">,
+  sessionId: string,
+  data: unknown,
+): Promise<string> {
   switch (stage) {
-    case "explore":  return "explores";
-    case "snapshot": return "snapshots";
-    case "plan":     return "tasks";
-    case "run":      return "runs";
-    case "learn":    return "learnings";
-    default:         return stage;
+    case "explore":
+      return (await writeArtifact("explore", ExploreOutput.parse(data), { sessionId })).path;
+    case "snapshot":
+      return (await writeArtifact("snapshot", SnapshotOutput.parse(data), { sessionId })).path;
+    case "plan":
+      return (await writeArtifact("plan", PlanOutput.parse(data), { sessionId })).path;
+    case "learn":
+      return (await writeArtifact("learn", LearnOutput.parse(data), { sessionId })).path;
   }
 }
 
-function saveStageArtifact(stage: string, data: unknown): string {
-  const dir = path.join(process.cwd(), stageOutputDir(stage));
-  const fileName = `${ts()}-${stage}.json`;
-  const filePath = path.join(dir, fileName);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", "utf8");
-  return filePath;
+async function saveAutoReport(report: AutoReport): Promise<string> {
+  const reportPath = path.join(await getDocsRoot(), "log", "auto", `${ts()}-auto-report.md`);
+  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
+  fs.writeFileSync(
+    reportPath,
+    [
+      "---",
+      "kind: auto-report",
+      "schemaVersion: 1",
+      `createdAt: ${new Date().toISOString()}`,
+      "---",
+      "",
+      "# Auto Report",
+      "",
+      "```json",
+      JSON.stringify(report, null, 2),
+      "```",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  return reportPath;
 }
 
 function printAutoReport(report: AutoReport, durationMs: number): void {
@@ -130,6 +154,23 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
 
   const model = opts.model ?? getModel(providerName);
   const provider = await getProvider(providerName, apiKey ?? undefined);
+
+  // ── Fail-fast: Builder needs file-writing capability (unless dry-run) ──
+  // Same logic as runCommand. The `cli` provider is exempt because the
+  // spawned binary (codex/claude) handles its own file operations.
+  if (!opts.dryRun && providerName !== "cli" && !provider.supportsToolUse) {
+    throw new ProviderError(
+      `El provider "${providerName}" no soporta tool use, así que el Builder no podría escribir archivos. ` +
+      `Usá uno de:\n` +
+      `  · --provider anthropic  (requiere ANTHROPIC_API_KEY)\n` +
+      `  · --provider openai     (requiere OPENAI_API_KEY)\n` +
+      `  · --agent codex         (requiere binario codex local)\n` +
+      `  · --agent claude        (requiere binario claude local)\n` +
+      `O agregá --dry-run si solo querés explore+snapshot+plan.`,
+      providerName,
+      { retryable: false },
+    );
+  }
 
   // ── Session ───────────────────────────────────────────────────────────────
   let session = createSession(intent);
@@ -206,7 +247,7 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
       if (exploreHitl.rounds > 0) log.dim(`    (${exploreHitl.rounds} rondas HITL)`);
     }
 
-    const explorePath = saveStageArtifact("explore", exploreOutput);
+    const explorePath = await saveStageArtifact("explore", session.id, exploreOutput);
     session = appendArtifact(session, "explore", explorePath);
     saveSession(session);
     stagesCompleted.push("explore");
@@ -270,7 +311,7 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
       if (snapshotHitl.rounds > 0) log.dim(`    (${snapshotHitl.rounds} rondas HITL)`);
     }
 
-    const snapshotPath = saveStageArtifact("snapshot", snapshotOutput);
+    const snapshotPath = await saveStageArtifact("snapshot", session.id, snapshotOutput);
     session = appendArtifact(session, "snapshot", snapshotPath);
     saveSession(session);
     stagesCompleted.push("snapshot");
@@ -322,7 +363,7 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
       if (planHitl.rounds > 0) log.dim(`    (${planHitl.rounds} rondas HITL)`);
     }
 
-    const planPath = saveStageArtifact("plan", planOutput);
+    const planPath = await saveStageArtifact("plan", session.id, planOutput);
     session = appendArtifact(session, "plan", planPath);
     saveSession(session);
     stagesCompleted.push("plan");
@@ -375,7 +416,7 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
     }
 
     stagesCompleted.push("run");
-    artifacts["run"] = path.join(process.cwd(), "runs");
+    artifacts["run"] = await listRunsDir();
 
     if (budget.isExceeded()) {
       throw new PipelineStop("run", "Budget excedido durante run");
@@ -389,7 +430,7 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
 
       try {
         const learnOutput = await generateLearnOutput({
-          runPath: path.join(process.cwd(), "runs"),
+          runPath: await listRunsDir(),
           provider,
           model,
           onUsage: makeUsageCb("learn"),
@@ -397,7 +438,7 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
 
         learnSpinner.succeed("Learn · aprendizajes capturados");
 
-        const learnPath = saveStageArtifact("learn", learnOutput);
+        const learnPath = await saveStageArtifact("learn", session.id, learnOutput);
         session = appendArtifact(session, "learn", learnPath);
         saveSession(session);
         stagesCompleted.push("learn");
@@ -455,10 +496,7 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
     budget: budget.getState(),
   };
 
-  // Guardar report
-  const reportPath = path.join(process.cwd(), "runs", `${ts()}-auto-report.json`);
-  fs.mkdirSync(path.dirname(reportPath), { recursive: true });
-  fs.writeFileSync(reportPath, JSON.stringify(report, null, 2) + "\n", "utf8");
+  const reportPath = await saveAutoReport(report);
 
   // Print summary
   console.log("");

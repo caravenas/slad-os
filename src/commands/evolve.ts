@@ -10,6 +10,8 @@ import { projectContextBlock } from "../core/context.js";
 import { log } from "../core/logger.js";
 import { getProvider } from "../models/index.js";
 import { getActiveSession, appendArtifact, saveSession, sessionContextBlock } from "../core/session.js";
+import { writeArtifact } from "../persistence/index.js";
+import { getDocsRoot } from "../persistence/layout.js";
 
 export interface EvolveOpts {
   provider?: string;
@@ -30,10 +32,6 @@ function extractJson(raw: string): string {
   return body.slice(first, last + 1).trim();
 }
 
-function timestamp(): string {
-  return new Date().toISOString().replace(/[:.]/g, "-");
-}
-
 function readFiles(dir: string, ext: string, maxFiles: number): string[] {
   if (!fs.existsSync(dir)) return [];
   return fs
@@ -45,18 +43,32 @@ function readFiles(dir: string, ext: string, maxFiles: number): string[] {
     .map((file) => `File: ${file}\n\n${fs.readFileSync(file, "utf8")}`);
 }
 
-function buildContext(): string {
+function learnContractContext(): string {
+  return [
+    "Consolidated learn contract:",
+    "- sourceRun=session marks a session-level synthesis, not a filesystem path.",
+    "- taskId=all is a valid LearnOutput task id for consolidated session learnings.",
+    "- Treat taskId=all as evidence across the session, not as a PlanTask dependency.",
+  ].join("\n");
+}
+
+async function buildContext(): Promise<string> {
+  const docsRoot = await getDocsRoot();
+  const logRoot = path.join(docsRoot, "log");
   const sections = [
-    ["Snapshots", readFiles(path.join(process.cwd(), "snapshots"), ".md", 3)],
-    ["Tasks", readFiles(path.join(process.cwd(), "tasks"), ".json", 2)],
-    ["Runs", readFiles(path.join(process.cwd(), "runs"), ".json", 5)],
-    ["Learnings", readFiles(path.join(process.cwd(), "learnings"), ".md", 5)],
+    ["Snapshots", readFiles(path.join(logRoot, "snapshots"), ".md", 3)],
+    ["Plans", readFiles(path.join(logRoot, "plans"), ".md", 2)],
+    ["Runs", readFiles(path.join(logRoot, "runs"), ".md", 5)],
+    ["Learnings", readFiles(path.join(logRoot, "learnings"), ".md", 5)],
   ];
 
   return sections
     .map(([title, files]) => {
       const content = files as string[];
-      return `## ${title}\n\n${content.length ? content.join("\n\n---\n\n") : "None"}`;
+      const body = title === "Learnings"
+        ? [learnContractContext(), content.length ? content.join("\n\n---\n\n") : "None"].join("\n\n")
+        : content.length ? content.join("\n\n---\n\n") : "None";
+      return `## ${title}\n\n${body}`;
     })
     .join("\n\n====\n\n");
 }
@@ -128,7 +140,7 @@ export async function evolveCommand(opts: EvolveOpts): Promise<void> {
   log.title(`Evolve · ${providerName}${model ? ` · ${model}` : ""}`);
 
   const sessionCtx = session ? sessionContextBlock(session) : "";
-  const context = [projectContextBlock(), buildContext(), sessionCtx]
+  const context = [projectContextBlock(), await buildContext(), sessionCtx]
     .filter(Boolean)
     .join("\n\n====\n\n");
 
@@ -203,11 +215,9 @@ export async function evolveCommand(opts: EvolveOpts): Promise<void> {
   }
 
   const markdown = renderEvolution(output);
-  const outPath = opts.output ?? path.join(process.cwd(), "evolution", `${timestamp()}-evolve.md`);
-  const content = opts.json ? JSON.stringify(output, null, 2) + "\n" : markdown;
-  fs.mkdirSync(path.dirname(path.resolve(outPath)), { recursive: true });
-  fs.writeFileSync(outPath, content, "utf8");
-  log.success(`Guardado en ${outPath}`);
+  const ref = await writeArtifact("evolve", output, { sessionId: session?.id ?? "adhoc" });
+  if (opts.output) log.warn("--output para evolve está deprecado; se escribió en la persistencia MD+YAML.");
+  log.success(`Guardado en ${ref.path}`);
 
   if (opts.applyWiki) {
     if (!config.wikiPath) {
@@ -219,7 +229,7 @@ export async function evolveCommand(opts: EvolveOpts): Promise<void> {
   }
 
   if (session) {
-    saveSession(appendArtifact(session, "evolve", outPath));
+    saveSession(appendArtifact(session, "evolve", ref.path));
     log.dim(`  sesión: ${session.id}`);
   }
 }

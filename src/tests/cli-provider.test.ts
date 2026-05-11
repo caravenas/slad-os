@@ -39,12 +39,30 @@ describe("CLIProvider internals", () => {
       "Use stdin for input, or provide <prompt>",
       "v1.0.0",
     );
-    assert.deepEqual(capability, { supportsStdin: true, supportsArg: true });
+    assert.deepEqual(capability, { supportsStdin: true, supportsArg: true, supportsOutputLastMessage: false });
   });
 
   it("detects runtime capabilities from --help/--version (negative)", () => {
     const capability = __cliInternals.detectRuntimeCapabilityFromTexts("gemini", "Usage: gemini [input]", "v1.0.0");
-    assert.deepEqual(capability, { supportsStdin: false, supportsArg: true });
+    assert.deepEqual(capability, { supportsStdin: false, supportsArg: true, supportsOutputLastMessage: false });
+  });
+
+  it("detects --output-last-message support in codex help", () => {
+    const capability = __cliInternals.detectRuntimeCapabilityFromTexts(
+      "codex",
+      "exec [options]\n  --output-last-message <file>  write last assistant message to file\n  --skip-git-repo-check",
+      "v1.0.0",
+    );
+    assert.equal(capability.supportsOutputLastMessage, true);
+  });
+
+  it("detects absence of --output-last-message in older codex", () => {
+    const capability = __cliInternals.detectRuntimeCapabilityFromTexts(
+      "codex",
+      "exec [options]\n  --skip-git-repo-check\n  --color <mode>",
+      "v0.9.0",
+    );
+    assert.equal(capability.supportsOutputLastMessage, false);
   });
 
   it("classifies fallback for missing gemini binary", () => {

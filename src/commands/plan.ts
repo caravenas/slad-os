@@ -17,6 +17,7 @@ import {
   saveSession,
   sessionContextBlock,
 } from "../core/session.js";
+import { readArtifact, writeArtifact } from "../persistence/index.js";
 
 export interface PlanOpts {
   input?: string;
@@ -37,11 +38,24 @@ function extractJson(raw: string): string {
   return body.slice(first, last + 1).trim();
 }
 
-function readSnapshot(input: string): { content: string; title: string } {
+async function readSnapshot(input: string): Promise<{ content: string; title: string }> {
   const abs = path.resolve(input);
   if (!fs.existsSync(abs)) {
     throw new Error(`No existe el archivo: ${abs}`);
   }
+
+  if (abs.endsWith(".md")) {
+    try {
+      const parsed = await readArtifact("snapshot", abs);
+      const title = parsed.value.content.match(/^#\s+(.+)$/m)?.[1] ?? path.basename(input);
+      return { content: parsed.value.content, title };
+    } catch {
+      const content = fs.readFileSync(abs, "utf8");
+      const title = content.match(/^#\s+(.+)$/m)?.[1] ?? path.basename(input);
+      return { content, title };
+    }
+  }
+
   const content = fs.readFileSync(abs, "utf8");
   const title = content.match(/^#\s+(.+)$/m)?.[1] ?? path.basename(input);
   return { content, title };
@@ -145,7 +159,7 @@ export async function planCommand(opts: PlanOpts): Promise<void> {
 
   let snapshot: { content: string; title: string };
   try {
-    snapshot = readSnapshot(inputPath);
+    snapshot = await readSnapshot(inputPath);
   } catch (err) {
     log.error((err as Error).message);
     process.exit(1);
@@ -249,13 +263,14 @@ export async function planCommand(opts: PlanOpts): Promise<void> {
     console.log("  → " + output.recommendedFirstTask);
   }
 
-  const outPath = opts.output ?? path.join(process.cwd(), "tasks", "tasks.json");
-  fs.mkdirSync(path.dirname(path.resolve(outPath)), { recursive: true });
-  fs.writeFileSync(outPath, json + "\n", "utf8");
-  log.success(`JSON guardado en ${outPath}`);
-
   if (session) {
-    saveSession(appendArtifact(session, "plan", outPath));
+    const ref = await writeArtifact("plan", output, { sessionId: session.id });
+    saveSession(appendArtifact(session, "plan", ref.path));
+    log.success(`Guardado en ${ref.path}`);
     log.dim(`  sesión: ${session.id}`);
+  } else {
+    const ref = await writeArtifact("plan", output, { sessionId: "adhoc" });
+    if (opts.output) log.warn("--output para plan está deprecado; se escribió en la persistencia MD+YAML.");
+    log.success(`Guardado en ${ref.path}`);
   }
 }

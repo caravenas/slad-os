@@ -18,6 +18,20 @@ import { evolveCommand } from "./evolve.js";
 import { autoCommand } from "./auto.js";
 import { sessionShowCommand } from "./session.js";
 
+/**
+ * Reference to the real process.exit captured at module load.
+ *
+ * `safeCall` swaps `process.exit` for a throwing stub while a sub-command
+ * runs. If the SIGINT handler (registered inside `chatCommand`) reads
+ * `process.exit` lazily, it can pick up that stub when fired during
+ * `signal-exit`/inquirer plumbing — the throw escapes from a synchronous
+ * event listener and crashes the process.
+ *
+ * Capturing it once at module load lets the SIGINT handler always exit
+ * cleanly regardless of whether safeCall is mid-flight.
+ */
+const ORIGINAL_PROCESS_EXIT = process.exit.bind(process);
+
 export interface ChatOpts {
   provider?: string;
   agent?: string;
@@ -326,7 +340,9 @@ export async function chatCommand(opts: ChatOpts): Promise<void> {
 
   process.on("SIGINT", () => {
     console.log("\n" + kleur.dim("Hasta luego."));
-    process.exit(0);
+    // Use the original process.exit captured at module load so that we
+    // never accidentally hit safeCall's throwing stub from a sync listener.
+    ORIGINAL_PROCESS_EXIT(0);
   });
 
   while (true) {

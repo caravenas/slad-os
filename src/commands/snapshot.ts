@@ -15,6 +15,7 @@ import {
   saveSession,
   sessionContextBlock,
 } from "../core/session.js";
+import { readArtifact, writeArtifact } from "../persistence/index.js";
 
 export interface SnapshotOpts {
   input?: string;
@@ -25,16 +26,6 @@ export interface SnapshotOpts {
   model?: string;
   output?: string;
   skipSession?: boolean;
-}
-
-function slugify(s: string): string {
-  return s
-    .toLowerCase()
-    .normalize("NFKD")
-    .replace(/[̀-ͯ]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "")
-    .slice(0, 60);
 }
 
 function extractJson(raw: string): string {
@@ -111,16 +102,22 @@ function parseSnapshotOutput(raw: string): ReturnType<typeof SnapshotOutput.pars
   return result.data;
 }
 
-function buildUserContent(opts: SnapshotOpts, sessionCtx: string): { content: string; title: string } {
+async function readExploreInput(input: string): Promise<ReturnType<typeof ExploreOutput.parse>> {
+  const abs = path.resolve(input);
+  if (!fs.existsSync(abs)) throw new Error(`No existe el archivo: ${abs}`);
+  if (abs.endsWith(".md")) return (await readArtifact("explore", abs)).value;
+
+  const raw = JSON.parse(fs.readFileSync(abs, "utf8"));
+  const parsed = ExploreOutput.safeParse(raw);
+  if (!parsed.success) {
+    throw new Error(`El archivo no sigue el schema de ExploreOutput:\n${parsed.error.message}`);
+  }
+  return parsed.data;
+}
+
+async function buildUserContent(opts: SnapshotOpts, sessionCtx: string): Promise<{ content: string; title: string }> {
   if (opts.input) {
-    const abs = path.resolve(opts.input);
-    if (!fs.existsSync(abs)) throw new Error(`No existe el archivo: ${abs}`);
-    const raw = JSON.parse(fs.readFileSync(abs, "utf8"));
-    const parsed = ExploreOutput.safeParse(raw);
-    if (!parsed.success) {
-      throw new Error(`El archivo no sigue el schema de ExploreOutput:\n${parsed.error.message}`);
-    }
-    const exp = parsed.data;
+    const exp = await readExploreInput(opts.input);
 
     const chosen = opts.approach
       ? exp.approaches.find((a) => a.name.toLowerCase().includes(opts.approach!.toLowerCase()))
@@ -149,7 +146,7 @@ function buildUserContent(opts: SnapshotOpts, sessionCtx: string): { content: st
   }
 
   throw new Error(
-    "Necesitas --input <explore.json>, --intent \"<texto>\", o una sesión activa con explore completado.",
+    "Necesitas --input <explore.md|explore.json>, --intent \"<texto>\", o una sesión activa con explore completado.",
   );
 }
 
@@ -181,7 +178,7 @@ export async function snapshotCommand(opts: SnapshotOpts): Promise<void> {
   const projectCtx = projectContextBlock();
   let userPayload: { content: string; title: string };
   try {
-    userPayload = buildUserContent(opts, sessionCtx);
+    userPayload = await buildUserContent(opts, sessionCtx);
     if (projectCtx) {
       userPayload = { ...userPayload, content: `${projectCtx}\n\n${userPayload.content}` };
     }
@@ -239,22 +236,19 @@ export async function snapshotCommand(opts: SnapshotOpts): Promise<void> {
     rounds++;
   }
 
-  const markdown = output.content.replace(/^```(?:markdown|md)?\s*/i, "").replace(/```\s*$/i, "").trim();
-
-  const outPath =
-    opts.output ??
-    path.join(
-      process.cwd(),
-      "snapshots",
-      `${new Date().toISOString().slice(0, 10)}-${slugify(userPayload.title)}.md`,
-    );
-
-  fs.mkdirSync(path.dirname(outPath), { recursive: true });
-  fs.writeFileSync(outPath, markdown + "\n", "utf8");
-  log.success(`Guardado en ${outPath}`);
+  output = {
+    ...output,
+    content: output.content.replace(/^```(?:markdown|md)?\s*/i, "").replace(/```\s*$/i, "").trim(),
+  };
 
   if (session) {
-    saveSession(appendArtifact(session, "snapshot", outPath));
+    const ref = await writeArtifact("snapshot", output, { sessionId: session.id });
+    saveSession(appendArtifact(session, "snapshot", ref.path));
+    log.success(`Guardado en ${ref.path}`);
     log.dim(`  sesión: ${session.id}`);
+  } else {
+    const ref = await writeArtifact("snapshot", output, { sessionId: "adhoc" });
+    if (opts.output) log.warn("--output para snapshot está deprecado; se escribió en la persistencia MD+YAML.");
+    log.success(`Guardado en ${ref.path}`);
   }
 }

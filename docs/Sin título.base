@@ -1,0 +1,8 @@
+views:
+  - type: table
+    name: Tabla
+    filters:
+      and:
+        - file.folder == "log/explores"
+    order:
+      - file.name

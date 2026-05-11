@@ -77,13 +77,21 @@ export const SnapshotOutput = z.object({
 });
 export type SnapshotOutput = z.infer<typeof SnapshotOutput>;
 
+export const TaskId = z.string().regex(/^T\d+$/);
+export type TaskId = z.infer<typeof TaskId>;
+
+// Consolidated learn artifacts intentionally summarize every RunOutput in a
+// session, so they use the sentinel task id "all" instead of a PlanTask id.
+export const LearnTaskId = z.union([TaskId, z.literal("all")]);
+export type LearnTaskId = z.infer<typeof LearnTaskId>;
+
 export const PlanTask = z.object({
-  id: z.string().regex(/^T\d+$/),
+  id: TaskId,
   title: z.string(),
   description: z.string(),
   type: z.enum(["research", "implementation", "test", "docs", "review"]),
   priority: z.enum(["high", "medium", "low"]),
-  dependsOn: z.array(z.string().regex(/^T\d+$/)).default([]),
+  dependsOn: z.array(TaskId).default([]),
   files: z.array(z.string()).default([]),
   acceptanceCriteria: z.array(z.string()).min(1),
 });
@@ -97,13 +105,13 @@ export const PlanOutput = z.object({
   verification: z.array(z.string()).default([]),
   risks: z.array(z.string()).default([]),
   openQuestions: z.array(z.string()).default([]),
-  recommendedFirstTask: z.string().regex(/^T\d+$/).optional(),
+  recommendedFirstTask: TaskId.optional(),
   questions: z.array(Question).default([]),
 });
 export type PlanOutput = z.infer<typeof PlanOutput>;
 
 export const RunOutput = z.object({
-  taskId: z.string().regex(/^T\d+$/),
+  taskId: TaskId,
   status: z.enum(["completed", "blocked", "failed", "awaiting_human"]),
   summary: z.string(),
   changedFiles: z.array(z.string()).default([]),
@@ -134,7 +142,7 @@ export type RunOutput = z.infer<typeof RunOutput>;
 export const LearnOutput = z.object({
   status: z.enum(["completed", "awaiting_human"]).default("completed"),
   sourceRun: z.string(),
-  taskId: z.string().regex(/^T\d+$/),
+  taskId: LearnTaskId,
   summary: z.string(),
   decisions: z.array(z.string()).default([]),
   errors: z.array(z.string()).default([]),

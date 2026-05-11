@@ -1,4 +1,3 @@
-import fs from "node:fs";
 import path from "node:path";
 import ora from "ora";
 import kleur from "kleur";
@@ -10,6 +9,7 @@ import { collectAnswers, formatAnswersForPrompt, printHitlHeader } from "../core
 import { log } from "../core/logger.js";
 import { SchemaError } from "../core/errors.js";
 import { getActiveSession, appendArtifact, saveSession } from "../core/session.js";
+import { writeArtifact } from "../persistence/index.js";
 import { readWikiContextCached } from "../agents/explorer.js";
 import { hashStructured, hashText, readOrCreateReusableValue } from "../cache/reusable.js";
 import { projectContextBlock } from "../core/context.js";
@@ -209,20 +209,19 @@ export async function exploreCommand(intent: string, opts: ExploreOpts): Promise
   console.log("  → " + output.recommendedNext);
 
   const session = opts.skipSession ? null : getActiveSession();
-  const defaultOut = session ? path.join(process.cwd(), "out", "explore.json") : undefined;
-  const outPath = opts.output ?? defaultOut;
 
-  if (outPath) {
-    const json = JSON.stringify(output, null, 2);
-    fs.mkdirSync(path.dirname(path.resolve(outPath)), { recursive: true });
-    fs.writeFileSync(outPath, json, "utf8");
-    log.success(`JSON guardado en ${outPath}`);
-  } else if (opts.json) {
+  if (opts.json) {
     console.log(JSON.stringify(output, null, 2));
   }
 
-  if (session && outPath) {
-    saveSession(appendArtifact(session, "explore", outPath));
+  if (session) {
+    const ref = await writeArtifact("explore", output, { sessionId: session.id });
+    saveSession(appendArtifact(session, "explore", ref.path));
+    log.success(`Guardado en ${ref.path}`);
     log.dim(`  sesión: ${session.id}`);
+  } else if (opts.output) {
+    const ref = await writeArtifact("explore", output, { sessionId: "adhoc" });
+    log.warn("--output para explore está deprecado; se escribió en la persistencia MD+YAML.");
+    log.success(`Guardado en ${ref.path}`);
   }
 }

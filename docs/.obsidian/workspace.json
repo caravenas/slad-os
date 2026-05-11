@@ -1,0 +1,210 @@
+{
+  "main": {
+    "id": "cba3784f4629dc9d",
+    "type": "split",
+    "children": [
+      {
+        "id": "ab2372a2377d822b",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "31b2d0b57b714c0b",
+            "type": "leaf",
+            "state": {
+              "type": "markdown",
+              "state": {
+                "file": "log/explores/2026-05-07-191322-agregar-un-test-de-integracion-que-verif.md",
+                "mode": "source",
+                "source": false
+              },
+              "icon": "lucide-file",
+              "title": "2026-05-07-191322-agregar-un-test-de-integracion-que-verif"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "vertical"
+  },
+  "left": {
+    "id": "6b73c3da0cf8e5bc",
+    "type": "split",
+    "children": [
+      {
+        "id": "bc299fccb3e3d1db",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "d385b93b446c3460",
+            "type": "leaf",
+            "state": {
+              "type": "file-explorer",
+              "state": {
+                "sortOrder": "alphabetical",
+                "autoReveal": false
+              },
+              "icon": "lucide-folder-closed",
+              "title": "Explorador de archivos"
+            }
+          },
+          {
+            "id": "0e6b9f3a1ee3dbb1",
+            "type": "leaf",
+            "state": {
+              "type": "search",
+              "state": {
+                "query": "",
+                "matchingCase": false,
+                "explainSearch": false,
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical"
+              },
+              "icon": "lucide-search",
+              "title": "Buscar"
+            }
+          },
+          {
+            "id": "8433453fd638b4c5",
+            "type": "leaf",
+            "state": {
+              "type": "bookmarks",
+              "state": {},
+              "icon": "lucide-bookmark",
+              "title": "Marcadores"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300
+  },
+  "right": {
+    "id": "4b8157199c3f3f75",
+    "type": "split",
+    "children": [
+      {
+        "id": "484574408a5beef4",
+        "type": "tabs",
+        "children": [
+          {
+            "id": "92df28010bb103f9",
+            "type": "leaf",
+            "state": {
+              "type": "backlink",
+              "state": {
+                "file": "log/runs/2026-05-07-191322-agregar-un-test-de-integracion-que-verif_T1.md",
+                "collapseAll": false,
+                "extraContext": false,
+                "sortOrder": "alphabetical",
+                "showSearch": false,
+                "searchQuery": "",
+                "backlinkCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-coming-in",
+              "title": "Enlaces entrantes de 2026-05-07-191322-agregar-un-test-de-integracion-que-verif_T1"
+            }
+          },
+          {
+            "id": "70de3b4dc385162a",
+            "type": "leaf",
+            "state": {
+              "type": "outgoing-link",
+              "state": {
+                "file": "log/runs/2026-05-07-191322-agregar-un-test-de-integracion-que-verif_T1.md",
+                "linksCollapsed": false,
+                "unlinkedCollapsed": true
+              },
+              "icon": "links-going-out",
+              "title": "Enlaces salientes de 2026-05-07-191322-agregar-un-test-de-integracion-que-verif_T1"
+            }
+          },
+          {
+            "id": "3cfbab3e5903fa26",
+            "type": "leaf",
+            "state": {
+              "type": "tag",
+              "state": {
+                "sortOrder": "frequency",
+                "useHierarchy": true,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-tags",
+              "title": "Etiquetas"
+            }
+          },
+          {
+            "id": "2e2a0392d47a0cbc",
+            "type": "leaf",
+            "state": {
+              "type": "all-properties",
+              "state": {
+                "sortOrder": "frequency",
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-archive",
+              "title": "Todas las propiedades"
+            }
+          },
+          {
+            "id": "592bc8944f00464c",
+            "type": "leaf",
+            "state": {
+              "type": "outline",
+              "state": {
+                "file": "log/runs/2026-05-07-191322-agregar-un-test-de-integracion-que-verif_T1.md",
+                "followCursor": false,
+                "showSearch": false,
+                "searchQuery": ""
+              },
+              "icon": "lucide-list",
+              "title": "Esquema de 2026-05-07-191322-agregar-un-test-de-integracion-que-verif_T1"
+            }
+          }
+        ]
+      }
+    ],
+    "direction": "horizontal",
+    "width": 300,
+    "collapsed": true
+  },
+  "left-ribbon": {
+    "hiddenItems": {
+      "switcher:Abrir selector rápido": false,
+      "graph:Abrir vista gráfica": false,
+      "canvas:Crear nuevo lienzo": false,
+      "daily-notes:Abrir la nota de hoy": false,
+      "templates:Insertar plantilla": false,
+      "command-palette:Abrir paleta de comandos": false,
+      "bases:Crear nueva base": false,
+      "templater-obsidian:Templater": false
+    }
+  },
+  "active": "31b2d0b57b714c0b",
+  "lastOpenFiles": [
+    "Sin título.base",
+    "log/explores/2026-05-08-233212-que-el-comando-learn-capture-aprendizaje.md",
+    "log/runs/2026-05-08-233212-que-el-comando-learn-capture-aprendizaje_T1.md",
+    "log/plans/2026-05-08-233212-que-el-comando-learn-capture-aprendizaje.md",
+    "log/runs/2026-05-07-191322-agregar-un-test-de-integracion-que-verif_T1.md",
+    "wiki/slad-os-evolution.md",
+    "cache/project-cache-integration-map.md",
+    "cache/project-cache-v1.md",
+    "log/runs/2026-05-07-191322-agregar-un-test-de-integracion-que-verif_T5.md",
+    "plans/2026-05-07-191322-agregar-un-test-de-integracion-que-verif/T1.md",
+    "log/sessions/2026-05-07-191322-agregar-un-test-de-integracion-que-verif.md",
+    "log/explores/2026-05-07-191322-agregar-un-test-de-integracion-que-verif.md",
+    "log/auto/2026-05-07T23-34-56-389Z-auto-report.md",
+    "log/auto/2026-05-07T23-34-52-066Z-auto.md",
+    "log/evolution/2026-05-07-191322-agregar-un-test-de-integracion-que-verif.md",
+    "plans/2026-05-07-191322-agregar-un-test-de-integracion-que-verif",
+    "plans",
+    "log/runs/2026-05-07-191322-agregar-un-test-de-integracion-que-verif_T2.md",
+    "log/runs/2026-05-07-191322-agregar-un-test-de-integracion-que-verif_T4.md",
+    "log/runs/2026-05-07-191322-agregar-un-test-de-integracion-que-verif_T3.md"
+  ]
+}

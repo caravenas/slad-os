@@ -98,13 +98,13 @@ test("stats fails explicitly when a persisted session is corrupt", { concurrency
 
   try {
     process.chdir(project);
-    const corruptStatePath = path.join(project, "sessions", "corrupt", "state.json");
+    const corruptStatePath = path.join(project, "docs", "log", "sessions", "corrupt.md");
     fs.mkdirSync(path.dirname(corruptStatePath), { recursive: true });
-    fs.writeFileSync(corruptStatePath, "{ invalid json\n", "utf8");
+    fs.writeFileSync(corruptStatePath, "---\n: invalid yaml\n---\n", "utf8");
 
     await assert.rejects(() => statsCommand({ json: true }), (err: unknown) => {
       assert.equal(err instanceof SessionError, true);
-      assert.match((err as Error).message, /JSON inválido/);
+      assert.match((err as Error).message, /estado inválido/);
       return true;
     });
   } finally {

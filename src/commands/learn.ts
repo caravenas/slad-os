@@ -4,17 +4,18 @@ import ora from "ora";
 import kleur from "kleur";
 import { LEARN_SYSTEM } from "../agents/prompts.js";
 import { getApiKey, getModel, loadConfig, resolveProvider } from "../core/config.js";
-import { LearnOutput, RunOutput, type ChatMessage } from "../core/types.js";
+import { LearnOutput, RunOutput, type ChatMessage, type SessionState } from "../core/types.js";
 import { collectAnswers, formatAnswersForPrompt, printHitlHeader } from "../core/hitl.js";
 import { projectContextBlock } from "../core/context.js";
+import { SchemaError } from "../core/errors.js";
 import { log } from "../core/logger.js";
-import { getProvider } from "../models/index.js";
-import { listArtifacts } from "../persistence/index.js";
+import { getProvider, type ModelProvider } from "../models/index.js";
+import { listArtifacts, writeArtifact } from "../persistence/index.js";
+import { artifactDirSync, resetDocsRootCache } from "../persistence/layout.js";
 import { parseRun } from "../persistence/parse/run.js";
 import {
   getActiveSession,
-  lastArtifactPath,
-  appendArtifact,
+  upsertArtifact,
   saveSession,
   sessionContextBlock,
 } from "../core/session.js";
@@ -27,6 +28,8 @@ export interface LearnOpts {
   output?: string;
   json?: boolean;
   skipSession?: boolean;
+  modelProvider?: ModelProvider;
+  cwd?: string;
 }
 
 function extractJson(raw: string): string {
@@ -38,8 +41,41 @@ function extractJson(raw: string): string {
   return body.slice(first, last + 1).trim();
 }
 
-function timestamp(): string {
-  return new Date().toISOString().replace(/[:.]/g, "-");
+function zodIssueMessages(error: { issues: Array<{ path: Array<string | number>; message: string }> }): string[] {
+  return error.issues.map((issue) => `${issue.path.join(".")} — ${issue.message}`);
+}
+
+function parseLearnOutput(raw: string): LearnOutput {
+  const jsonText = extractJson(raw);
+  const parsed = JSON.parse(jsonText);
+  const result = LearnOutput.safeParse(parsed);
+  if (!result.success) {
+    throw new SchemaError(
+      "Learn output no pasa el schema",
+      jsonText,
+      zodIssueMessages(result.error),
+      "learn",
+    );
+  }
+  return result.data;
+}
+
+function forceSyntheticLearnIdentity(output: LearnOutput): LearnOutput {
+  const synthetic = {
+    ...output,
+    sourceRun: "session",
+    taskId: "all",
+  };
+  const result = LearnOutput.safeParse(synthetic);
+  if (!result.success) {
+    throw new SchemaError(
+      "Learn output sintético no pasa el schema",
+      JSON.stringify(synthetic, null, 2),
+      zodIssueMessages(result.error),
+      "learn",
+    );
+  }
+  return result.data;
 }
 
 // ─── Pure generator (sin UI) ──────────────────────────────────────────────────
@@ -87,14 +123,7 @@ export async function generateLearnOutput(opts: GenerateLearnOpts): Promise<Lear
     },
   );
 
-  const jsonText = extractJson(raw);
-  const parsed = JSON.parse(jsonText);
-  const result = LearnOutput.safeParse(parsed);
-  if (!result.success) {
-    const issues = result.error.issues.map((i) => `  ${i.path.join(".")} — ${i.message}`).join("\n");
-    throw new Error(`Learn output no pasa el schema:\n${issues}\n\nJSON recibido:\n${jsonText}`);
-  }
-  return result.data;
+  return parseLearnOutput(raw);
 }
 
 function latestLegacyJsonFile(dir: string): string | null {
@@ -109,9 +138,25 @@ function latestLegacyJsonFile(dir: string): string | null {
   return files[0] ?? null;
 }
 
-async function latestRunFile(dir: string): Promise<string | null> {
+function latestMarkdownRunFile(dir: string): string | null {
+  if (!fs.existsSync(dir)) return null;
+  const files = fs
+    .readdirSync(dir)
+    .filter((file) => file.endsWith(".md"))
+    .map((file) => path.join(dir, file))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  return files[0] ?? null;
+}
+
+async function latestRunFile(dir: string, cwd = process.cwd()): Promise<string | null> {
   const legacy = latestLegacyJsonFile(dir);
   if (legacy) return legacy;
+
+  const localMarkdown = latestMarkdownRunFile(dir);
+  if (localMarkdown) return localMarkdown;
+
+  const cwdMarkdown = latestMarkdownRunFile(artifactDirSync("run", cwd));
+  if (cwdMarkdown) return cwdMarkdown;
 
   const refs = await listArtifacts("run");
   return refs
@@ -119,18 +164,28 @@ async function latestRunFile(dir: string): Promise<string | null> {
     .find((ref) => fs.existsSync(ref.path))?.path ?? null;
 }
 
-async function readRun(input: string | undefined, sessionRunPath?: string): Promise<{ source: string; content: RunOutput }> {
+function resolveRunPath(candidate: string, cwd: string): string {
+  return path.isAbsolute(candidate) ? candidate : path.resolve(cwd, candidate);
+}
+
+async function readRun(
+  input: string | undefined,
+  sessionRunPath?: string,
+  cwd = process.cwd(),
+): Promise<{ source: string; content: RunOutput }> {
   let candidate =
     input ??
     sessionRunPath ??
-    await latestRunFile(path.join(process.cwd(), "runs")) ??
+    await latestRunFile(path.join(cwd, "runs"), cwd) ??
     "";
 
+  if (candidate) candidate = resolveRunPath(candidate, cwd);
+
   if (candidate && fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
-    candidate = await latestRunFile(candidate) ?? "";
+    candidate = await latestRunFile(candidate, cwd) ?? "";
   }
 
-  const runPath = path.resolve(candidate);
+  const runPath = candidate ? resolveRunPath(candidate, cwd) : "";
   if (!runPath || !fs.existsSync(runPath)) {
     throw new Error("No existe un run report. Usa --input <run.md|run.json> o corre `slad run` primero.");
   }
@@ -144,73 +199,104 @@ async function readRun(input: string | undefined, sessionRunPath?: string): Prom
   return { source: runPath, content: RunOutput.parse(raw) };
 }
 
-function renderLearning(output: LearnOutput): string {
-  const list = (items: string[]) => (items.length ? items.map((item) => `- ${item}`).join("\n") : "- None");
-  return [
-    `# ${output.wikiEntryTitle}`,
-    "",
-    `Source run: ${output.sourceRun}`,
-    `Task: ${output.taskId}`,
-    "",
-    "## Summary",
-    output.summary,
-    "",
-    "## Decisions",
-    list(output.decisions),
-    "",
-    "## Errors / Blockers",
-    list(output.errors),
-    "",
-    "## Patterns",
-    list(output.patterns),
-    "",
-    "## Open Questions",
-    list(output.openQuestions),
-    "",
-    "## Follow-ups",
-    list(output.followUps),
-    "",
-  ].join("\n");
+async function readSessionRuns(
+  session: SessionState,
+  cwd = process.cwd(),
+): Promise<Array<{ source: string; content: RunOutput }>> {
+  const runArtifacts = session.artifacts.filter((artifact) => artifact.kind === "run");
+  if (runArtifacts.length === 0) {
+    throw new Error("La sesión activa no tiene artifacts run. Corre `slad run` primero.");
+  }
+
+  const runs: Array<{ source: string; content: RunOutput }> = [];
+  for (const artifact of runArtifacts) {
+    runs.push(await readRun(artifact.path, undefined, cwd));
+  }
+  return runs;
+}
+
+function formatRunsForPrompt(runs: Array<{ source: string; content: RunOutput }>): string {
+  return runs
+    .map((run, index) => [
+      `Run ${index + 1}`,
+      `Source run path:\n${run.source}`,
+      `Run report:\n${JSON.stringify(run.content, null, 2)}`,
+    ].join("\n\n"))
+    .join("\n\n---\n\n");
+}
+
+function resolveArtifactPath(filePath: string, cwd: string): string {
+  return path.isAbsolute(filePath) ? filePath : path.resolve(cwd, filePath);
+}
+
+function removePreviousLearnArtifacts(session: SessionState, taskId: string, cwd: string): void {
+  const paths = new Set(
+    session.artifacts
+      .filter((artifact) => artifact.kind === "learn")
+      .map((artifact) => resolveArtifactPath(artifact.path, cwd)),
+  );
+  paths.add(path.join(artifactDirSync("learn", cwd), `${session.id}_${taskId}.md`));
+
+  for (const filePath of paths) {
+    if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
+      fs.unlinkSync(filePath);
+    }
+  }
+}
+
+async function writeLearnArtifact(output: LearnOutput, sessionId: string, cwd: string) {
+  const previousCwd = process.cwd();
+  try {
+    resetDocsRootCache();
+    if (previousCwd !== cwd) process.chdir(cwd);
+    return await writeArtifact("learn", output, { sessionId });
+  } finally {
+    if (previousCwd !== cwd) process.chdir(previousCwd);
+    resetDocsRootCache();
+  }
 }
 
 export async function learnCommand(opts: LearnOpts): Promise<void> {
-  const session = opts.skipSession ? null : getActiveSession();
-  const sessionRunPath = session ? lastArtifactPath(session, "run") : undefined;
+  const cwd = opts.cwd ?? process.cwd();
+  const session = opts.skipSession ? null : getActiveSession(cwd);
 
-  if (!opts.input && sessionRunPath) {
-    log.dim(`  sesión: usando run en ${sessionRunPath}`);
+  if (!opts.input && session) {
+    const count = session.artifacts.filter((artifact) => artifact.kind === "run").length;
+    if (count > 0) log.dim(`  sesión: usando ${count} run${count === 1 ? "" : "s"}`);
   }
 
   const config = loadConfig();
   const providerName = resolveProvider(opts.provider, opts.agent, config.defaultProvider);
-  const apiKey = getApiKey(providerName);
+  const apiKey = opts.modelProvider ? null : getApiKey(providerName);
 
-  if (providerName !== "cli" && !apiKey) {
+  if (!opts.modelProvider && providerName !== "cli" && !apiKey) {
     log.error(
       `No se encontró API key para ${providerName}. Define la variable de entorno correspondiente.`,
     );
     process.exit(1);
   }
 
-  let run: { source: string; content: RunOutput };
+  let runs: Array<{ source: string; content: RunOutput }>;
   try {
-    run = await readRun(opts.input, sessionRunPath);
+    runs = !opts.input && session
+      ? await readSessionRuns(session, cwd)
+      : [await readRun(opts.input, undefined, cwd)];
   } catch (err) {
     log.error((err as Error).message);
     process.exit(1);
   }
 
   const model = opts.model ?? getModel(providerName);
-  const provider = await getProvider(providerName, apiKey ?? undefined);
+  const provider = opts.modelProvider ?? await getProvider(providerName, apiKey ?? undefined);
 
   log.title(`Learn · ${providerName}${model ? ` · ${model}` : ""}`);
-  log.dim(`run: ${run.source}`);
+  log.dim(runs.length === 1 ? `run: ${runs[0].source}` : `runs: ${runs.length}`);
 
   const sessionCtx = session ? sessionContextBlock(session) : "";
   const userContent = [
-    projectContextBlock(),
-    `Source run path:\n${run.source}`,
-    `Run report:\n${JSON.stringify(run.content, null, 2)}`,
+    projectContextBlock(cwd),
+    `Runs consolidados (${runs.length}) en orden estable de SessionState. Incluye todos los artifacts run de la sesión, sin filtrar por status.`,
+    formatRunsForPrompt(runs),
     sessionCtx,
   ].filter(Boolean).join("\n\n");
 
@@ -236,14 +322,10 @@ export async function learnCommand(opts: LearnOpts): Promise<void> {
     }
 
     try {
-      const jsonText = extractJson(raw);
-      const parsed = JSON.parse(jsonText);
-      const result = LearnOutput.safeParse(parsed);
-      if (!result.success) {
-        const issues = result.error.issues.map((i) => `  ${i.path.join(".")} — ${i.message}`).join("\n");
-        throw new Error(`Learn output no pasa el schema:\n${issues}\n\nJSON recibido:\n${jsonText}`);
-      }
-      output = result.data;
+      const parsedOutput = parseLearnOutput(raw);
+      output = !opts.input && session
+        ? forceSyntheticLearnIdentity(parsedOutput)
+        : parsedOutput;
     } catch (err) {
       spinner.fail("Falló la validación de aprendizajes");
       log.error((err as Error).message);
@@ -284,15 +366,15 @@ export async function learnCommand(opts: LearnOpts): Promise<void> {
     }
   }
 
-  const outPath =
-    opts.output ?? path.join(process.cwd(), "learnings", `${timestamp()}-${output.taskId}.md`);
-  const content = opts.json ? JSON.stringify(output, null, 2) + "\n" : renderLearning(output);
-  fs.mkdirSync(path.dirname(path.resolve(outPath)), { recursive: true });
-  fs.writeFileSync(outPath, content, "utf8");
-  log.success(`Guardado en ${outPath}`);
-
   if (session) {
-    saveSession(appendArtifact(session, "learn", outPath));
+    removePreviousLearnArtifacts(session, output.taskId, cwd);
+    const ref = await writeLearnArtifact(output, session.id, cwd);
+    saveSession(upsertArtifact(session, "learn", ref.path, output.taskId), cwd);
+    log.success(`Guardado en ${ref.path}`);
     log.dim(`  sesión: ${session.id}`);
+  } else {
+    const ref = await writeLearnArtifact(output, "adhoc", cwd);
+    if (opts.output) log.warn("--output para learn está deprecado; se escribió en la persistencia MD+YAML.");
+    log.success(`Guardado en ${ref.path}`);
   }
 }

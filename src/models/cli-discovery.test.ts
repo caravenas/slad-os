@@ -7,6 +7,10 @@ import test from "node:test";
 import { SladError } from "../core/errors.js";
 import { sessionStartCommand } from "../commands/session.js";
 import { computePathHash, discoverCliCandidates } from "./cli-discovery.js";
+import { renderSession } from "../persistence/render/session.js";
+import { stringifyYaml } from "../persistence/yaml.js";
+import { parseCliDiscoveryArtifact } from "../persistence/parse/session.js";
+import type { DiscoveryResult, SessionState } from "../core/types.js";
 
 const TEST_TIMEOUT_MS = 3000;
 
@@ -27,8 +31,48 @@ function shScript(output: string): string {
   return `#!/bin/sh\nprintf '%s\\n' "${output}"\n`;
 }
 
-async function readJson(filePath: string): Promise<unknown> {
-  return JSON.parse(await fs.readFile(filePath, "utf8"));
+function renderDiscoveryArtifact(sessionId: string, discovery: DiscoveryResult): string {
+  return [
+    "---",
+    stringifyYaml({
+      kind: "cli-discovery",
+      schemaVersion: 1,
+      sessionId,
+      createdAt: new Date().toISOString(),
+      discovery,
+    }).trimEnd(),
+    "---",
+    "",
+    `# CLI Discovery ${sessionId}`,
+    "",
+  ].join("\n");
+}
+
+async function writeDiscoverySession(
+  project: string,
+  sessionId: string,
+  discovery: DiscoveryResult,
+  answer: string,
+): Promise<string> {
+  const sessionsRoot = path.join(project, "docs", "log", "sessions");
+  await fs.mkdir(sessionsRoot, { recursive: true });
+  const artifactPath = path.join(sessionsRoot, `${sessionId}_cli-discovery.md`);
+  await fs.writeFile(artifactPath, renderDiscoveryArtifact(sessionId, discovery), "utf8");
+
+  const session: SessionState = {
+    id: sessionId,
+    createdAt: new Date().toISOString(),
+    intent: "prev",
+    artifacts: [{ kind: "cli-discovery", path: artifactPath, createdAt: new Date().toISOString() }],
+    humanAnswers: [{ taskId: "sessionStart", questionId: "cli_candidate", answer, askedAt: new Date().toISOString() }],
+    notes: [],
+  };
+  await fs.writeFile(path.join(sessionsRoot, `${sessionId}.md`), renderSession(session, { sessionId }), "utf8");
+  return artifactPath;
+}
+
+async function readDiscovery(filePath: string): Promise<DiscoveryResult> {
+  return parseCliDiscoveryArtifact(await fs.readFile(filePath, "utf8"), filePath);
 }
 
 test("(1) detección básica de binario IA conocido", async () => {
@@ -151,24 +195,12 @@ test("(5) reutiliza artefacto previo resuelto (sesión posterior) sin re-pregunt
   const hash = computePathHash([pathA, pathB]);
 
   const previousSessionId = "s-prev";
-  const prevArtifactDir = path.join(project, "sessions", previousSessionId, "artifacts");
-  await fs.mkdir(prevArtifactDir, { recursive: true });
-  const prevArtifactPath = path.join(prevArtifactDir, "cli-discovery.json");
-  await fs.writeFile(
-    prevArtifactPath,
-    JSON.stringify(
-      {
-        candidates: [
-          {
-            binary: "codex",
-            resolvedPath: "/fake/bin/codex",
-            version: "1.0.0",
-            evidence: ["validated:help_or_version"],
-            confidenceScore: 0.9,
-            conflicts: [],
-          },
-        ],
-        selected: {
+  await writeDiscoverySession(
+    project,
+    previousSessionId,
+    {
+      candidates: [
+        {
           binary: "codex",
           resolvedPath: "/fake/bin/codex",
           version: "1.0.0",
@@ -176,31 +208,19 @@ test("(5) reutiliza artefacto previo resuelto (sesión posterior) sin re-pregunt
           confidenceScore: 0.9,
           conflicts: [],
         },
-        pathHash: hash,
-        status: "resolved",
+      ],
+      selected: {
+        binary: "codex",
+        resolvedPath: "/fake/bin/codex",
+        version: "1.0.0",
+        evidence: ["validated:help_or_version"],
+        confidenceScore: 0.9,
+        conflicts: [],
       },
-      null,
-      2,
-    ) + "\n",
-    "utf8",
-  );
-
-  const prevStatePath = path.join(project, "sessions", previousSessionId, "state.json");
-  await fs.writeFile(
-    prevStatePath,
-    JSON.stringify(
-      {
-        id: previousSessionId,
-        createdAt: new Date().toISOString(),
-        intent: "prev",
-        artifacts: [{ kind: "cli-discovery", path: prevArtifactPath, createdAt: new Date().toISOString() }],
-        humanAnswers: [{ taskId: "sessionStart", questionId: "cli_candidate", answer: "codex | /fake/bin/codex | score=0.90", askedAt: new Date().toISOString() }],
-        notes: [],
-      },
-      null,
-      2,
-    ) + "\n",
-    "utf8",
+      pathHash: hash,
+      status: "resolved",
+    },
+    "codex | /fake/bin/codex | score=0.90",
   );
 
   const prevArgv = process.argv.slice();
@@ -213,12 +233,12 @@ test("(5) reutiliza artefacto previo resuelto (sesión posterior) sin re-pregunt
 
   try {
     await sessionStartCommand("nueva sesion reutiliza discovery");
-    const sessionsRoot = path.join(project, "sessions");
+    const sessionsRoot = path.join(project, "docs", "log", "sessions");
     const entries = await fs.readdir(sessionsRoot);
-    const newSessionId = entries.find((id) => id !== previousSessionId);
+    const newSessionId = entries.find((id) => id.endsWith(".md") && id !== `${previousSessionId}.md` && !id.includes("_cli-discovery"))?.replace(/\.md$/, "");
     assert.ok(newSessionId);
-    const artifactPath = path.join(sessionsRoot, newSessionId as string, "artifacts", "cli-discovery.json");
-    const artifact = (await readJson(artifactPath)) as { selected?: { resolvedPath: string }; status: string; pathHash: string };
+    const artifactPath = path.join(sessionsRoot, `${newSessionId}_cli-discovery.md`);
+    const artifact = await readDiscovery(artifactPath);
     assert.equal(artifact.status, "resolved");
     assert.equal(artifact.pathHash, hash);
     assert.equal(artifact.selected?.resolvedPath, "/fake/bin/codex");
@@ -251,24 +271,12 @@ test("(6) invalida selección previa cuando cambia PATH y desaparece binario ele
   await linkEchoBinary(path.join(currB, "codex"));
 
   const previousSessionId = "s-prev";
-  const prevArtifactDir = path.join(project, "sessions", previousSessionId, "artifacts");
-  await fs.mkdir(prevArtifactDir, { recursive: true });
-  const prevArtifactPath = path.join(prevArtifactDir, "cli-discovery.json");
-  await fs.writeFile(
-    prevArtifactPath,
-    JSON.stringify(
-      {
-        candidates: [
-          {
-            binary: "codex",
-            resolvedPath: "/gone/bin/codex",
-            version: "1.0.0",
-            evidence: ["validated:help_or_version"],
-            confidenceScore: 0.9,
-            conflicts: [],
-          },
-        ],
-        selected: {
+  await writeDiscoverySession(
+    project,
+    previousSessionId,
+    {
+      candidates: [
+        {
           binary: "codex",
           resolvedPath: "/gone/bin/codex",
           version: "1.0.0",
@@ -276,31 +284,19 @@ test("(6) invalida selección previa cuando cambia PATH y desaparece binario ele
           confidenceScore: 0.9,
           conflicts: [],
         },
-        pathHash: oldHash,
-        status: "resolved",
+      ],
+      selected: {
+        binary: "codex",
+        resolvedPath: "/gone/bin/codex",
+        version: "1.0.0",
+        evidence: ["validated:help_or_version"],
+        confidenceScore: 0.9,
+        conflicts: [],
       },
-      null,
-      2,
-    ) + "\n",
-    "utf8",
-  );
-
-  const prevStatePath = path.join(project, "sessions", previousSessionId, "state.json");
-  await fs.writeFile(
-    prevStatePath,
-    JSON.stringify(
-      {
-        id: previousSessionId,
-        createdAt: new Date().toISOString(),
-        intent: "prev",
-        artifacts: [{ kind: "cli-discovery", path: prevArtifactPath, createdAt: new Date().toISOString() }],
-        humanAnswers: [{ taskId: "sessionStart", questionId: "cli_candidate", answer: "codex | /gone/bin/codex | score=0.90", askedAt: new Date().toISOString() }],
-        notes: [],
-      },
-      null,
-      2,
-    ) + "\n",
-    "utf8",
+      pathHash: oldHash,
+      status: "resolved",
+    },
+    "codex | /gone/bin/codex | score=0.90",
   );
 
   const prevArgv = process.argv.slice();

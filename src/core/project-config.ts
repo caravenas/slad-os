@@ -1,4 +1,5 @@
 import path from "node:path";
+import fs from "node:fs";
 import { readFile } from "node:fs/promises";
 import { ProjectConfig } from "./types.js";
 import { ConfigError } from "./errors.js";
@@ -14,6 +15,23 @@ export async function loadProjectConfig(projectRoot: string = process.cwd()): Pr
   } catch (err: any) {
     if (err.code === "ENOENT") {
       // No config file → defaults
+      return ProjectConfig.parse({});
+    }
+    if (err instanceof SyntaxError) {
+      throw new ConfigError(`invalid JSON in ${CONFIG_PATH}`, { cause: err });
+    }
+    throw err;
+  }
+}
+
+export function loadProjectConfigSync(projectRoot: string = process.cwd()): ProjectConfig {
+  const file = path.join(projectRoot, CONFIG_PATH);
+  try {
+    const text = fs.readFileSync(file, "utf8");
+    const json = JSON.parse(text);
+    return ProjectConfig.parse(json);
+  } catch (err: any) {
+    if (err.code === "ENOENT") {
       return ProjectConfig.parse({});
     }
     if (err instanceof SyntaxError) {

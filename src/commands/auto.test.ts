@@ -14,7 +14,7 @@ function stageOutputDir(stage: string): string {
   switch (stage) {
     case "explore":  return "explores";
     case "snapshot": return "snapshots";
-    case "plan":     return "tasks";
+    case "plan":     return "plans";
     case "run":      return "runs";
     case "learn":    return "learnings";
     default:         return stage;
@@ -30,7 +30,7 @@ describe("auto helpers", () => {
   it("stageOutputDir mapea stages correctamente", () => {
     assert.equal(stageOutputDir("explore"),  "explores");
     assert.equal(stageOutputDir("snapshot"), "snapshots");
-    assert.equal(stageOutputDir("plan"),     "tasks");
+    assert.equal(stageOutputDir("plan"),     "plans");
     assert.equal(stageOutputDir("run"),      "runs");
     assert.equal(stageOutputDir("learn"),    "learnings");
     assert.equal(stageOutputDir("unknown"),  "unknown");

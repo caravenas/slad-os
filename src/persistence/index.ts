@@ -1,14 +1,37 @@
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import type { RunOutput } from "../core/types.js";
+import type {
+  EvolveOutput,
+  ExploreOutput,
+  LearnOutput,
+  PlanOutput,
+  RunOutput,
+  SessionState,
+  SnapshotOutput,
+} from "../core/types.js";
 import { ParseError } from "../core/errors.js";
 import { renderRun } from "./render/run.js";
+import { renderExplore } from "./render/explore.js";
+import { renderSnapshot } from "./render/snapshot.js";
+import { renderPlan } from "./render/plan.js";
+import { renderLearn } from "./render/learn.js";
+import { renderEvolve } from "./render/evolve.js";
+import { renderSession } from "./render/session.js";
 import { parseRun } from "./parse/run.js";
+import { parseExplore } from "./parse/explore.js";
+import { parseSnapshot } from "./parse/snapshot.js";
+import { parsePlan } from "./parse/plan.js";
+import { parseLearn } from "./parse/learn.js";
+import { parseEvolve } from "./parse/evolve.js";
+import { parseSession } from "./parse/session.js";
 import {
+  artifactDir,
+  pathForArtifact,
   pathForRun,
+  timestampedPathForArtifact,
   timestampedPathForRun,
-  listRunsDir,
 } from "./layout.js";
+import { parseFrontmatter } from "./frontmatter.js";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -23,19 +46,19 @@ export type ArtifactKind =
 
 export type ArtifactByKind = {
   run: RunOutput;
-  // Others added in future milestones — map to unknown for now to keep TS happy
-  explore: unknown;
-  snapshot: unknown;
-  plan: unknown;
-  learn: unknown;
-  evolve: unknown;
-  session: unknown;
+  explore: ExploreOutput;
+  snapshot: SnapshotOutput;
+  plan: PlanOutput;
+  learn: LearnOutput;
+  evolve: EvolveOutput;
+  session: SessionState;
 };
 
 export interface WriteContext {
   sessionId: string;
   /** ISO string; default: new Date().toISOString() */
   createdAt?: string;
+  key?: string;
 }
 
 export interface ArtifactRef<K extends ArtifactKind = ArtifactKind> {
@@ -63,20 +86,19 @@ export async function writeArtifact<K extends ArtifactKind>(
   value: ArtifactByKind[K],
   ctx: WriteContext,
 ): Promise<ArtifactRef<K>> {
-  if (kind !== "run") {
-    throw new Error(`writeArtifact: kind "${kind}" not implemented in milestone 1`);
-  }
-
-  const runOutput = value as RunOutput;
   const createdAt = ctx.createdAt ?? new Date().toISOString();
   const writeCtx: WriteContext = { ...ctx, createdAt };
 
-  const content = renderRun(runOutput, writeCtx);
+  const content = renderArtifact(kind, value, writeCtx);
 
-  // Determine path — use timestamped variant if primary already exists
-  const primary = await pathForRun(ctx.sessionId, runOutput.taskId);
+  const key = artifactKey(kind, value, ctx.key);
+  const primary = kind === "run"
+    ? await pathForRun(ctx.sessionId, (value as RunOutput).taskId)
+    : await pathForArtifact(kind, ctx.sessionId, key);
   const filePath = existsSync(primary)
-    ? await timestampedPathForRun(ctx.sessionId, runOutput.taskId, createdAt)
+    ? kind === "run"
+      ? await timestampedPathForRun(ctx.sessionId, (value as RunOutput).taskId, createdAt)
+      : await timestampedPathForArtifact(kind, ctx.sessionId, createdAt, key)
     : primary;
 
   // Ensure parent dirs exist
@@ -89,9 +111,71 @@ export async function writeArtifact<K extends ArtifactKind>(
     kind,
     path: filePath,
     sessionId: ctx.sessionId,
-    taskId: runOutput.taskId,
+    ...(taskIdFor(kind, value) ? { taskId: taskIdFor(kind, value) } : {}),
     createdAt,
   };
+}
+
+function renderArtifact<K extends ArtifactKind>(
+  kind: K,
+  value: ArtifactByKind[K],
+  ctx: WriteContext,
+): string {
+  switch (kind) {
+    case "explore":
+      return renderExplore(value as ExploreOutput, ctx);
+    case "snapshot":
+      return renderSnapshot(value as SnapshotOutput, ctx);
+    case "plan":
+      return renderPlan(value as PlanOutput, ctx);
+    case "run":
+      return renderRun(value as RunOutput, ctx);
+    case "learn":
+      return renderLearn(value as LearnOutput, ctx);
+    case "evolve":
+      return renderEvolve(value as EvolveOutput, ctx);
+    case "session":
+      return renderSession(value as SessionState, ctx);
+  }
+}
+
+function parseArtifact<K extends ArtifactKind>(
+  kind: K,
+  text: string,
+  filePath: string,
+): ParseResult<ArtifactByKind[K]> {
+  switch (kind) {
+    case "explore":
+      return parseExplore(text, filePath) as ParseResult<ArtifactByKind[K]>;
+    case "snapshot":
+      return parseSnapshot(text, filePath) as ParseResult<ArtifactByKind[K]>;
+    case "plan":
+      return parsePlan(text, filePath) as ParseResult<ArtifactByKind[K]>;
+    case "run":
+      return parseRun(text, filePath) as ParseResult<ArtifactByKind[K]>;
+    case "learn":
+      return parseLearn(text, filePath) as ParseResult<ArtifactByKind[K]>;
+    case "evolve":
+      return parseEvolve(text, filePath) as ParseResult<ArtifactByKind[K]>;
+    case "session":
+      return parseSession(text, filePath) as ParseResult<ArtifactByKind[K]>;
+  }
+}
+
+function artifactKey<K extends ArtifactKind>(
+  kind: K,
+  value: ArtifactByKind[K],
+  explicit?: string,
+): string | undefined {
+  if (explicit) return explicit;
+  if (kind === "learn") return (value as LearnOutput).taskId;
+  return undefined;
+}
+
+function taskIdFor<K extends ArtifactKind>(kind: K, value: ArtifactByKind[K]): string | undefined {
+  if (kind === "run") return (value as RunOutput).taskId;
+  if (kind === "learn") return (value as LearnOutput).taskId;
+  return undefined;
 }
 
 // ─── readArtifact ─────────────────────────────────────────────────────────────
@@ -104,10 +188,6 @@ export async function readArtifact<K extends ArtifactKind>(
   kind: K,
   filePath: string,
 ): Promise<ParseResult<ArtifactByKind[K]>> {
-  if (kind !== "run") {
-    throw new Error(`readArtifact: kind "${kind}" not implemented in milestone 1`);
-  }
-
   let text: string;
   try {
     text = await readFile(filePath, "utf8");
@@ -119,8 +199,7 @@ export async function readArtifact<K extends ArtifactKind>(
     });
   }
 
-  const result = parseRun(text, filePath);
-  return result as ParseResult<ArtifactByKind[K]>;
+  return parseArtifact(kind, text, filePath);
 }
 
 // ─── listArtifacts ────────────────────────────────────────────────────────────
@@ -133,11 +212,7 @@ export async function listArtifacts<K extends ArtifactKind>(
   kind: K,
   filter?: { sessionId?: string },
 ): Promise<ArtifactRef<K>[]> {
-  if (kind !== "run") {
-    throw new Error(`listArtifacts: kind "${kind}" not implemented in milestone 1`);
-  }
-
-  const dir = await listRunsDir();
+  const dir = await artifactDir(kind);
 
   let files: string[];
   try {
@@ -153,14 +228,10 @@ export async function listArtifacts<K extends ArtifactKind>(
   for (const filePath of files) {
     try {
       const text = await readFile(filePath, "utf8");
-      // Quick regex scan of frontmatter for metadata — avoids full YAML parse
-      const sessionMatch = text.match(/sessionId:\s*(.+)/);
-      const taskMatch = text.match(/taskId:\s*(.+)/);
-      const createdAtMatch = text.match(/createdAt:\s*(.+)/);
-
-      const sessionId = sessionMatch?.[1]?.trim() ?? "";
-      const taskId = taskMatch?.[1]?.trim() ?? undefined;
-      const createdAt = createdAtMatch?.[1]?.trim() ?? "";
+      const { frontmatter } = parseFrontmatter(text, filePath);
+      const sessionId = String(frontmatter.sessionId ?? "");
+      const taskId = typeof frontmatter.taskId === "string" ? frontmatter.taskId : undefined;
+      const createdAt = String(frontmatter.createdAt ?? "");
 
       if (filter?.sessionId && sessionId !== filter.sessionId) continue;
 

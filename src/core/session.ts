@@ -2,9 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { SessionError } from "./errors.js";
 import { SessionState, type SessionArtifactKind, type SessionAnswer } from "./types.js";
+import { artifactDirSync } from "../persistence/layout.js";
+import { renderSession } from "../persistence/render/session.js";
+import { parseSession } from "../persistence/parse/session.js";
 
-const SESSIONS_DIR = "sessions";
-const ACTIVE_FILE = ".slad-session";
+const ACTIVE_FILE = ".active-session";
 
 function slugify(s: string): string {
   return s
@@ -24,44 +26,47 @@ function generateId(intent: string): string {
 }
 
 function sessionsRoot(cwd: string): string {
-  return path.join(cwd, SESSIONS_DIR);
+  return artifactDirSync("session", cwd);
 }
 
 function statePath(id: string, cwd: string): string {
-  return path.join(sessionsRoot(cwd), id, "state.json");
+  return path.join(sessionsRoot(cwd), `${id}.md`);
+}
+
+function legacyStatePath(id: string, cwd: string): string {
+  return path.join(cwd, "sessions", id, "state.json");
 }
 
 function activeFilePath(cwd: string): string {
-  return path.join(cwd, ACTIVE_FILE);
+  return path.join(sessionsRoot(cwd), ACTIVE_FILE);
+}
+
+function legacyActiveFilePath(cwd: string): string {
+  return path.join(cwd, ".slad-session");
 }
 
 function loadSessionStrict(id: string, cwd = process.cwd()): SessionState {
   const p = statePath(id, cwd);
-  if (!fs.existsSync(p)) {
-    throw new SessionError(`Sesión '${id}' sin state.json.`, { sessionId: id, path: p });
+  const legacy = legacyStatePath(id, cwd);
+  const sourcePath = fs.existsSync(p) ? p : legacy;
+  if (!fs.existsSync(sourcePath)) {
+    throw new SessionError(`Sesión '${id}' sin archivo de estado.`, { sessionId: id, path: p });
   }
 
-  let raw: unknown;
   try {
-    raw = JSON.parse(fs.readFileSync(p, "utf8"));
+    const text = fs.readFileSync(sourcePath, "utf8");
+    if (sourcePath.endsWith(".md")) {
+      return parseSession(text, sourcePath).value;
+    }
+    const raw = JSON.parse(text);
+    return SessionState.parse(raw);
   } catch (err) {
-    throw new SessionError(`Sesión '${id}' tiene JSON inválido en state.json.`, {
+    throw new SessionError(`Sesión '${id}' tiene estado inválido.`, {
       sessionId: id,
-      path: p,
+      path: sourcePath,
       cause: err instanceof Error ? err.message : String(err),
     });
   }
-
-  const parsed = SessionState.safeParse(raw);
-  if (!parsed.success) {
-    throw new SessionError(`Sesión '${id}' no cumple el schema SessionState.`, {
-      sessionId: id,
-      path: p,
-      issues: parsed.error.issues.map((issue) => issue.message),
-    });
-  }
-
-  return parsed.data;
 }
 
 export function createSession(intent: string, cwd = process.cwd()): SessionState {
@@ -82,25 +87,30 @@ export function createSession(intent: string, cwd = process.cwd()): SessionState
 export function saveSession(session: SessionState, cwd = process.cwd()): void {
   const p = statePath(session.id, cwd);
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, JSON.stringify(session, null, 2) + "\n", "utf8");
+  fs.writeFileSync(p, renderSession(session, { sessionId: session.id }), "utf8");
 }
 
 export function setActiveSession(id: string, cwd = process.cwd()): void {
+  fs.mkdirSync(path.dirname(activeFilePath(cwd)), { recursive: true });
   fs.writeFileSync(activeFilePath(cwd), id + "\n", "utf8");
 }
 
 export function getActiveSessionId(cwd = process.cwd()): string | null {
   const p = activeFilePath(cwd);
-  if (!fs.existsSync(p)) return null;
+  if (!fs.existsSync(p)) {
+    const legacy = legacyActiveFilePath(cwd);
+    if (!fs.existsSync(legacy)) return null;
+    return fs.readFileSync(legacy, "utf8").trim() || null;
+  }
   return fs.readFileSync(p, "utf8").trim() || null;
 }
 
 export function loadSession(id: string, cwd = process.cwd()): SessionState | null {
   const p = statePath(id, cwd);
-  if (!fs.existsSync(p)) return null;
+  const legacy = legacyStatePath(id, cwd);
+  if (!fs.existsSync(p) && !fs.existsSync(legacy)) return null;
   try {
-    const raw = JSON.parse(fs.readFileSync(p, "utf8"));
-    return SessionState.parse(raw);
+    return loadSessionStrict(id, cwd);
   } catch {
     return null;
   }
@@ -121,8 +131,8 @@ export function listSessions(cwd = process.cwd()): SessionState[] {
   if (!fs.existsSync(root)) return [];
   return fs
     .readdirSync(root)
-    .filter((entry) => fs.statSync(path.join(root, entry)).isDirectory())
-    .map((entry) => loadSessionStrict(entry, cwd))
+    .filter((entry) => entry.endsWith(".md") && !entry.includes("_cli-discovery"))
+    .map((entry) => loadSessionStrict(path.basename(entry, ".md"), cwd))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 
@@ -153,18 +163,27 @@ export function upsertArtifact(
   filePath: string,
   taskId?: string,
 ): SessionState {
+  const replacement = {
+    kind,
+    path: filePath,
+    createdAt: new Date().toISOString(),
+    ...(taskId ? { taskId } : {}),
+  };
+  const firstExistingIndex = session.artifacts.findIndex((artifact) => artifact.kind === kind);
   const filtered = session.artifacts.filter((artifact) => artifact.kind !== kind);
+  const insertAt = firstExistingIndex === -1
+    ? filtered.length
+    : session.artifacts
+      .slice(0, firstExistingIndex)
+      .filter((artifact) => artifact.kind !== kind).length;
+
   return {
     ...session,
     currentPhase: kind,
     artifacts: [
-      ...filtered,
-      {
-        kind,
-        path: filePath,
-        createdAt: new Date().toISOString(),
-        ...(taskId ? { taskId } : {}),
-      },
+      ...filtered.slice(0, insertAt),
+      replacement,
+      ...filtered.slice(insertAt),
     ],
   };
 }

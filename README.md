@@ -129,6 +129,15 @@ export OPENAI_MODEL=gpt-4o
 export GEMINI_MODEL=gemini-1.5-pro
 ```
 
+Soporte de tool use por provider:
+
+| Provider | Tool use (Builder) | Notas |
+|---|---|---|
+| `anthropic` | ✅ | Function calling nativo |
+| `openai` | ✅ | Function calling nativo |
+| `gemini` | ✅ | Function calling nativo (`@google/generative-ai`) |
+| `cli` | ❌ | El agente agentic corre en el subprocess |
+
 Para usar un binario local en vez de una API key:
 
 ```bash

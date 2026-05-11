@@ -32,6 +32,7 @@ import { projectContextBlock } from "../core/context.js";
 import { getDocsRoot, listRunsDir } from "../persistence/layout.js";
 import { writeArtifact, readArtifact } from "../persistence/index.js";
 import { saveAutoCheckpoint, clearAutoCheckpoint, loadAutoCheckpoint } from "./auto-checkpoint.js";
+import { appendBudgetHistory } from "../context/budget-history.js";
 import { select } from "@inquirer/prompts";
 
 export interface AutoOpts {
@@ -591,6 +592,21 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
 
   // Clear checkpoint when pipeline completes fully (no partial/failed)
   if (pipelineStatus === "completed") clearAutoCheckpoint();
+
+  // Persist budget history for cross-session stats
+  const budgetFinal = budget.getState();
+  appendBudgetHistory({
+    sessionId: session.id,
+    intent,
+    startedAt,
+    completedAt,
+    model: model ?? "_default",
+    provider: providerName,
+    inputTokens: budgetFinal.inputTokens,
+    outputTokens: budgetFinal.outputTokens,
+    estimatedCostUsd: budgetFinal.estimatedCostUsd,
+    stagesCompleted,
+  });
 
   // Print summary
   console.log("");

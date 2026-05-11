@@ -6,12 +6,25 @@ type StatsCommandOptions = {
 };
 
 function formatStats(stats: ProjectStats): string {
+  const totalTokens = stats.budget.totalInputTokens + stats.budget.totalOutputTokens;
+  const budgetLines =
+    stats.budget.totalRuns > 0
+      ? [
+          "",
+          kleur.bold("Budget history"),
+          `  Auto runs: ${kleur.cyan(String(stats.budget.totalRuns))}`,
+          `  Total tokens: ${kleur.cyan(totalTokens.toLocaleString())} (in: ${stats.budget.totalInputTokens.toLocaleString()}, out: ${stats.budget.totalOutputTokens.toLocaleString()})`,
+          `  Estimated cost: ${kleur.cyan("$" + stats.budget.totalEstimatedCostUsd.toFixed(4))}`,
+        ]
+      : [];
+
   return [
     "",
     kleur.bold("Project stats"),
     `  Sessions: ${kleur.cyan(String(stats.sessions))}`,
     `  Runs: ${kleur.cyan(String(stats.runs))}`,
     `  Learnings: ${kleur.cyan(String(stats.learnings))}`,
+    ...budgetLines,
   ].join("\n");
 }
 

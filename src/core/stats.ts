@@ -1,14 +1,21 @@
 import { listSessions } from "./session.js";
 import type { SessionState } from "./types.js";
+import { readBudgetHistory, summarizeBudgetHistory } from "../context/budget-history.js";
 
 export type ProjectStats = {
   sessions: number;
   runs: number;
   learnings: number;
+  budget: {
+    totalRuns: number;
+    totalInputTokens: number;
+    totalOutputTokens: number;
+    totalEstimatedCostUsd: number;
+  };
 };
 
-export function computeStatsFromSessions(sessions: SessionState[]): ProjectStats {
-  return sessions.reduce<ProjectStats>(
+export function computeStatsFromSessions(sessions: SessionState[]): Omit<ProjectStats, "budget"> {
+  return sessions.reduce<Omit<ProjectStats, "budget">>(
     (stats, session) => {
       stats.sessions += 1;
       for (const artifact of session.artifacts) {
@@ -22,5 +29,10 @@ export function computeStatsFromSessions(sessions: SessionState[]): ProjectStats
 }
 
 export function getProjectStats(cwd = process.cwd()): ProjectStats {
-  return computeStatsFromSessions(listSessions(cwd));
+  const sessionStats = computeStatsFromSessions(listSessions(cwd));
+  const budgetHistory = readBudgetHistory(cwd);
+  return {
+    ...sessionStats,
+    budget: summarizeBudgetHistory(budgetHistory),
+  };
 }

@@ -174,6 +174,8 @@ program
   .option("--harness <mode>", "Modo del arnés de seguridad (off | on | strict)", "on")
   .option("--dry-run", "Solo explore+snapshot+plan, sin ejecutar código")
   .option("--skip-learn", "No ejecutar learn al final")
+  .option("--resume", "Resumir desde el último checkpoint sin preguntar")
+  .option("--fresh", "Ignorar checkpoints y empezar de cero")
   .option("--json", "Output JSON del report final")
   .action(async (intentParts: string[], opts) => {
     await autoCommand(intentParts.join(" "), {
@@ -185,6 +187,8 @@ program
       harness: opts.harness,
       dryRun: opts.dryRun,
       skipLearn: opts.skipLearn,
+      resume: opts.resume,
+      fresh: opts.fresh,
       json: opts.json,
     });
   });

@@ -2,6 +2,8 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { ModelProvider } from "./index.js";
 import type { ChatMessage, CompletionOptions, ProviderName } from "../core/types.js";
 import { ProviderError } from "../core/errors.js";
+import { retryWithBackoff } from "./retry.js";
+import { log } from "../core/logger.js";
 
 const DEFAULT_MODEL = "gemini-1.5-pro";
 
@@ -37,19 +39,25 @@ export class GeminiProvider implements ModelProvider {
         parts: [{ text: m.content }],
       }));
 
-    let res: Awaited<ReturnType<typeof model.generateContent>>;
-    try {
-      res = await model.generateContent({ contents });
-    } catch (err: unknown) {
-      const apiErr = err as { status?: number; message?: string };
-      const retryable =
-        apiErr.status === 429 || apiErr.status === 500;
-      throw new ProviderError(
-        apiErr.message ?? "Gemini API error",
-        "gemini",
-        { statusCode: apiErr.status, retryable, cause: err as Error },
-      );
-    }
-    return res.response.text().trim();
+    return await retryWithBackoff(async () => {
+      try {
+        const res = await model.generateContent({ contents });
+        return res.response.text().trim();
+      } catch (err: unknown) {
+        const apiErr = err as { status?: number; message?: string };
+        const retryable = apiErr.status === 429 || apiErr.status === 500;
+        throw new ProviderError(
+          apiErr.message ?? "Gemini API error",
+          "gemini",
+          { statusCode: apiErr.status, retryable, cause: err as Error },
+        );
+      }
+    }, {
+      maxRetries: 3,
+      baseDelayMs: 1_000,
+      onRetry: (_err, attempt, delayMs) => {
+        log.debug(`gemini: reintento ${attempt}/3 en ${delayMs}ms`);
+      },
+    });
   }
 }

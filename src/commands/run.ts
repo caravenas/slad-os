@@ -12,7 +12,7 @@ import type { BudgetTracker } from "../context/budget.js";
 import { collectAnswers, formatAnswersForPrompt, printHitlHeader } from "../core/hitl.js";
 import { projectContextBlock } from "../core/context.js";
 import { log } from "../core/logger.js";
-import { ProviderError, SchemaError, SladError, isRetryable } from "../core/errors.js";
+import { ProviderError, SchemaError, SladError } from "../core/errors.js";
 import { readArtifact, writeArtifact } from "../persistence/index.js";
 import { parseRun } from "../persistence/parse/run.js";
 import { getDocsRoot } from "../persistence/layout.js";
@@ -300,11 +300,6 @@ async function executeTask(
         });
       }
     } catch (err) {
-      if (isRetryable(err) && rounds < maxRounds) {
-        spinner.text = `${task.id} · rate limited, reintentando en 5s...`;
-        await new Promise((r) => setTimeout(r, 5000));
-        continue;
-      }
       spinner.fail(`${task.id} · falló la llamada al provider`);
       throw err;
     }

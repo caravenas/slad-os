@@ -121,6 +121,8 @@ program
   .option("--max-rounds <n>", "Máximo de rounds HITL antes de marcar blocked (default: 3)", parseInt)
   .option("--auto", "Ejecutar el DAG completo de tareas automáticamente")
   .option("--max-tasks <n>", "Budget de ejecuciones en modo --auto (default: 10)", parseInt)
+  .option("--parallel", "Ejecutar tareas independientes del DAG en paralelo (requiere --auto, solo con --no-tools o modo no-interactivo)")
+  .option("--max-parallel <n>", "Máximo de tareas paralelas simultáneas (default: 3)", parseInt)
   .option("--json", "Imprimir JSON plano en stdout en lugar del resumen legible")
   .option("--skip-session", "Ignorar sesión activa (comportamiento v0.1.0)")
   .option("--harness <mode>", "Modo del arnés de seguridad (off | on | strict)", "off")

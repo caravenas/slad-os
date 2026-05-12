@@ -53,6 +53,8 @@ export interface AutoOpts {
   resume?: boolean;
   /** Ignorar checkpoints y empezar de cero */
   fresh?: boolean;
+  /** Test seam: inject a pre-built provider to avoid real API calls */
+  _provider?: import("../models/index.js").ModelProvider;
 }
 
 type PipelineStage = "explore" | "snapshot" | "plan" | "run" | "learn";
@@ -152,20 +154,27 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
   // ── Setup ─────────────────────────────────────────────────────────────────
   const config = loadConfig();
   const providerName = resolveProvider(opts.provider, opts.agent, config.defaultProvider);
-  const apiKey = getApiKey(providerName);
 
-  if (providerName !== "cli" && !apiKey) {
-    log.error(`No se encontró API key para ${providerName}.`);
-    process.exit(1);
+  let provider: import("../models/index.js").ModelProvider;
+  let model: string | undefined;
+  if (opts._provider) {
+    provider = opts._provider;
+    model = opts.model;
+  } else {
+    const apiKey = getApiKey(providerName);
+    if (providerName !== "cli" && !apiKey) {
+      log.error(`No se encontró API key para ${providerName}.`);
+      process.exit(1);
+    }
+    model = opts.model ?? getModel(providerName);
+    provider = await getProvider(providerName, apiKey ?? undefined);
   }
-
-  const model = opts.model ?? getModel(providerName);
-  const provider = await getProvider(providerName, apiKey ?? undefined);
 
   // ── Fail-fast: Builder needs file-writing capability (unless dry-run) ──
   // Same logic as runCommand. The `cli` provider is exempt because the
   // spawned binary (codex/claude) handles its own file operations.
-  if (!opts.dryRun && providerName !== "cli" && !provider.supportsToolUse) {
+  // Injected test providers (_provider) bypass this check.
+  if (!opts.dryRun && !opts._provider && providerName !== "cli" && !provider.supportsToolUse) {
     throw new ProviderError(
       `El provider "${providerName}" no soporta tool use, así que el Builder no podría escribir archivos. ` +
       `Usá uno de:\n` +

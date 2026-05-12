@@ -1,6 +1,6 @@
 # SLAD OS Roadmap & Status
 
-> Última actualización: 2026-05-12
+> Última actualización: 2026-05-12 (post JSON persistence refactor)
 
 ## Criterios de Madurez (Glosario)
 
@@ -17,7 +17,7 @@
 
 | Componente | Estado | Qué hay | Qué falta | Prioridad |
 |------------|--------|---------|-----------|-----------|
-| **Fase 1 — Pipeline tipado** | [Stable] | Los 6 stages implementados (`explore` → `snapshot` → `plan` → `run` → `learn` → `evolve`) + `chat` REPL + `auto` (pipeline completo intent→código); schemas Zod completos en `core/types.ts`; extracción JSON fence-aware; persistence layer con Markdown+YAML frontmatter (`persistence/`); `stats` command; **suite E2E sobre repo fixture con mock provider** (`src/tests/e2e-auto-dry-run.test.ts`). | Smoke test del binario `slad` compilado. | Alta |
+| **Fase 1 — Pipeline tipado** | [Stable] | Los 6 stages implementados (`explore` → `snapshot` → `plan` → `run` → `learn` → `evolve`) + `chat` REPL + `auto` (pipeline completo intent→código); schemas Zod completos en `core/types.ts`; extracción JSON fence-aware; persistence layer JSON puro (`persistence/`); `stats` command; **suite E2E sobre repo fixture con mock provider** (`src/tests/e2e-auto-dry-run.test.ts`). | Smoke test del binario `slad` compilado. | Alta |
 | **Comando: explore** | [Stable] | Análisis de intención, reframing, enfoques con pros/cons, riesgos, open questions. Wiki context injection opcional (`SLAD_WIKI_PATH`). | Refinamiento de prompts según feedback de uso real. | Baja |
 | **Comando: snapshot** | [Beta] | Generación de mini-spec `.md` a partir de explore o intención directa; template Markdown en `src/templates/`. | Template dinámico por lenguaje/stack; selección automática de approach. | Media |
 | **Comando: plan** | [Stable] | Conversión de Snapshot a `PlanTask[]` con DAG de dependencias; `recommendedFirstTask`; plan-level verification y risks. | Validación de dependencias circulares; re-planning parcial tras fallos. | Baja |
@@ -58,7 +58,7 @@
 
 | Componente | Estado | Qué hay | Qué falta | Prioridad |
 |------------|--------|---------|-----------|-----------|
-| **Artifact persistence** | [Beta] | Sistema unificado Markdown+YAML frontmatter; renderers y parsers por tipo (`persistence/render/`, `persistence/parse/`); `writeArtifact`/`readArtifact` API; layout configurable (`SLAD_DOCS_PATH`, `.slad-os/config.json`); secciones estructuradas. | Migración de JSON legacy; validación de integridad de artifacts. | Baja |
+| **Artifact persistence** | [Stable] | Sistema unificado **JSON puro** con envelope `{kind, schemaVersion, sessionId, createdAt, taskId?, value}`; `writeArtifact`/`readArtifact` API con validación Zod; layout configurable (`SLAD_DOCS_PATH`, `.slad-os/config.json`); 19 archivos de render/parse Markdown eliminados; dependencia `yaml` removida. | Validación de integridad de artifacts; migración de artifacts `.md` legacy. | Baja |
 | **Project config** | [Beta] | `.slad-os/config.json` con `docsPath`; `ProjectConfig` schema Zod. | Más opciones: default provider, harness mode, budget limits, etc. | Baja |
 
 ## Calidad y Distribución (Fases 6–7)
@@ -73,7 +73,7 @@
 | Componente | Estado | Qué hay | Qué falta | Prioridad |
 |------------|--------|---------|-----------|-----------|
 | **Fase 8 — Extensibilidad** | [Experimental] | Estructura modular (`agents/`, `commands/`, `models/`, `harness/`, `tools/`); `ToolRegistry` extensible; interfaces claras (ModelProvider, ToolDefinition). | API de plugins para custom agents/commands/tools; hooks pre/post stage; registry de skills; manifest `slad-plugin-*`. | Media |
-| **Fase 9 — UI Desktop** | [Planned] | Brief de prototipo completo (`docs/ui-prototype-brief.md`): layout 3-paneles, stage views, HITL tipado, knowledge view, provider switching. Spec visual con tono Linear/dark-mode, diferenciadores vs Conductor. | Prototipo visual; implementación (Tauri/Electron/Next.js); conexión al CLI vía subprocess + lectura de artifacts en `docs/log/`. | Media |
+| **Fase 9 — UI Desktop** | [Experimental] | Prototipo funcional en `localhost:3000`: layout 3-paneles, stage views, **"Friendly" JSON view** para artifacts del pipeline (trigger del refactor JSON persistence), HITL tipado, knowledge view, provider switching. Brief completo en `docs/ui-prototype-brief.md`. | Conexión completa al CLI vía subprocess; persistencia de sesión en UI; streaming de logs en vivo; primera release binario desktop. | Media |
 | **Fase 10 — Harness Engineering v0.3** | [Planned] | Concepto definido: pipeline como "fábrica" reproducible con aislamiento, setup determinista y evidencia inspeccionable. | **Tier 1**: Git Worktrees (aislamiento por sesión), Bootability stage (detección de setup/env/deps), Playwright CRI verifier (evidencia visual). **Tier 2**: Ticket-driven mode (Linear/GitHub Issues trigger), `workflow.mmd` export (Mermaid del pipeline), Observability ContextProvider (Grafana/Datadog/Sentry como contexto). | Baja |
 
 ---
@@ -142,7 +142,7 @@ Production blockers que separan un proyecto interesante de uno usable por tercer
 - [x] Resume detection — `run --auto` detecta tasks completadas y ofrece resumir
 - [x] Follow-up execution — ejecución de follow-ups sugeridos por el agente
 - [x] Harness de seguridad — clasificador, audit log, approval, 3 modes
-- [x] Persistence layer — Markdown+YAML frontmatter con renderers/parsers por tipo
+- [x] Persistence layer — **JSON puro** con envelope uniforme; eliminados ~700 LOC de render/parse Markdown y dependencia `yaml`
 - [x] Multi-provider — Anthropic, OpenAI, Gemini, CLI (Codex/Claude) con tool use
 - [x] CLI discovery — detección automática de binarios locales con cache
 - [x] Cache content-based — store, keys, invalidation, reusable API

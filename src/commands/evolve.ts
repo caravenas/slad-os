@@ -56,10 +56,10 @@ async function buildContext(): Promise<string> {
   const docsRoot = await getDocsRoot();
   const logRoot = path.join(docsRoot, "log");
   const sections = [
-    ["Snapshots", readFiles(path.join(logRoot, "snapshots"), ".md", 3)],
-    ["Plans", readFiles(path.join(logRoot, "plans"), ".md", 2)],
-    ["Runs", readFiles(path.join(logRoot, "runs"), ".md", 5)],
-    ["Learnings", readFiles(path.join(logRoot, "learnings"), ".md", 5)],
+    ["Snapshots", readFiles(path.join(logRoot, "snapshots"), ".json", 3)],
+    ["Plans", readFiles(path.join(logRoot, "plans"), ".json", 2)],
+    ["Runs", readFiles(path.join(logRoot, "runs"), ".json", 5)],
+    ["Learnings", readFiles(path.join(logRoot, "learnings"), ".json", 5)],
   ];
 
   return sections

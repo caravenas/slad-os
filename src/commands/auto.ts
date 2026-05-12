@@ -101,24 +101,12 @@ async function saveStageArtifact(
 }
 
 async function saveAutoReport(report: AutoReport): Promise<string> {
-  const reportPath = path.join(await getDocsRoot(), "log", "auto", `${ts()}-auto-report.md`);
+  const createdAt = new Date().toISOString();
+  const reportPath = path.join(await getDocsRoot(), "log", "auto", `${ts()}-auto-report.json`);
   fs.mkdirSync(path.dirname(reportPath), { recursive: true });
   fs.writeFileSync(
     reportPath,
-    [
-      "---",
-      "kind: auto-report",
-      "schemaVersion: 1",
-      `createdAt: ${new Date().toISOString()}`,
-      "---",
-      "",
-      "# Auto Report",
-      "",
-      "```json",
-      JSON.stringify(report, null, 2),
-      "```",
-      "",
-    ].join("\n"),
+    JSON.stringify({ kind: "auto-report", schemaVersion: 1, createdAt, value: report }, null, 2),
     "utf8",
   );
   return reportPath;

@@ -56,7 +56,7 @@ export async function pathForArtifact(
 ): Promise<string> {
   const dir = await artifactDir(kind);
   const suffix = key ? `_${key}` : "";
-  return path.join(dir, `${sessionId}${suffix}.md`);
+  return path.join(dir, `${sessionId}${suffix}.json`);
 }
 
 export async function timestampedPathForArtifact(
@@ -68,7 +68,7 @@ export async function timestampedPathForArtifact(
   const dir = await artifactDir(kind);
   const safe = isoTimestamp.replace(/[:.]/g, "-");
   const suffix = key ? `_${key}` : "";
-  return path.join(dir, `${sessionId}${suffix}__${safe}.md`);
+  return path.join(dir, `${sessionId}${suffix}__${safe}.json`);
 }
 
 export async function pathForRun(sessionId: string, taskId: string): Promise<string> {

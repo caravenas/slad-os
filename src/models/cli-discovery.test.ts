@@ -7,10 +7,7 @@ import test from "node:test";
 import { SladError } from "../core/errors.js";
 import { sessionStartCommand } from "../commands/session.js";
 import { computePathHash, discoverCliCandidates } from "./cli-discovery.js";
-import { renderSession } from "../persistence/render/session.js";
-import { stringifyYaml } from "../persistence/yaml.js";
-import { parseCliDiscoveryArtifact } from "../persistence/parse/session.js";
-import type { DiscoveryResult, SessionState } from "../core/types.js";
+import { DiscoveryResult } from "../core/types.js";
 
 const TEST_TIMEOUT_MS = 3000;
 
@@ -32,20 +29,11 @@ function shScript(output: string): string {
 }
 
 function renderDiscoveryArtifact(sessionId: string, discovery: DiscoveryResult): string {
-  return [
-    "---",
-    stringifyYaml({
-      kind: "cli-discovery",
-      schemaVersion: 1,
-      sessionId,
-      createdAt: new Date().toISOString(),
-      discovery,
-    }).trimEnd(),
-    "---",
-    "",
-    `# CLI Discovery ${sessionId}`,
-    "",
-  ].join("\n");
+  return JSON.stringify(
+    { kind: "cli-discovery", schemaVersion: 1, sessionId, createdAt: new Date().toISOString(), value: discovery },
+    null,
+    2,
+  );
 }
 
 async function writeDiscoverySession(
@@ -56,10 +44,10 @@ async function writeDiscoverySession(
 ): Promise<string> {
   const sessionsRoot = path.join(project, "docs", "log", "sessions");
   await fs.mkdir(sessionsRoot, { recursive: true });
-  const artifactPath = path.join(sessionsRoot, `${sessionId}_cli-discovery.md`);
+  const artifactPath = path.join(sessionsRoot, `${sessionId}_cli-discovery.json`);
   await fs.writeFile(artifactPath, renderDiscoveryArtifact(sessionId, discovery), "utf8");
 
-  const session: SessionState = {
+  const session = {
     id: sessionId,
     createdAt: new Date().toISOString(),
     intent: "prev",
@@ -67,12 +55,15 @@ async function writeDiscoverySession(
     humanAnswers: [{ taskId: "sessionStart", questionId: "cli_candidate", answer, askedAt: new Date().toISOString() }],
     notes: [],
   };
-  await fs.writeFile(path.join(sessionsRoot, `${sessionId}.md`), renderSession(session, { sessionId }), "utf8");
+  const sessionEnvelope = { kind: "session", schemaVersion: 1, sessionId, createdAt: session.createdAt, value: session };
+  await fs.writeFile(path.join(sessionsRoot, `${sessionId}.json`), JSON.stringify(sessionEnvelope, null, 2), "utf8");
   return artifactPath;
 }
 
-async function readDiscovery(filePath: string): Promise<DiscoveryResult> {
-  return parseCliDiscoveryArtifact(await fs.readFile(filePath, "utf8"), filePath);
+async function readDiscovery(filePath: string): Promise<ReturnType<typeof DiscoveryResult.parse>> {
+  const text = await fs.readFile(filePath, "utf8");
+  const envelope = JSON.parse(text) as Record<string, unknown>;
+  return DiscoveryResult.parse(envelope.value ?? envelope);
 }
 
 test("(1) detección básica de binario IA conocido", async () => {
@@ -235,9 +226,9 @@ test("(5) reutiliza artefacto previo resuelto (sesión posterior) sin re-pregunt
     await sessionStartCommand("nueva sesion reutiliza discovery");
     const sessionsRoot = path.join(project, "docs", "log", "sessions");
     const entries = await fs.readdir(sessionsRoot);
-    const newSessionId = entries.find((id) => id.endsWith(".md") && id !== `${previousSessionId}.md` && !id.includes("_cli-discovery"))?.replace(/\.md$/, "");
+    const newSessionId = entries.find((id) => id.endsWith(".json") && id !== `${previousSessionId}.json` && !id.includes("_cli-discovery"))?.replace(/\.json$/, "");
     assert.ok(newSessionId);
-    const artifactPath = path.join(sessionsRoot, `${newSessionId}_cli-discovery.md`);
+    const artifactPath = path.join(sessionsRoot, `${newSessionId}_cli-discovery.json`);
     const artifact = await readDiscovery(artifactPath);
     assert.equal(artifact.status, "resolved");
     assert.equal(artifact.pathHash, hash);

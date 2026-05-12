@@ -118,16 +118,16 @@ export class VersionError extends SladError {
 }
 
 /**
- * Persistence error for markdown/YAML artifact read/write operations.
- * phase: "yaml" — YAML parse failed; "zod" — Zod validation failed; "filesystem" — I/O error.
+ * Persistence error for artifact read/write operations.
+ * phase: "json" — JSON parse failed; "zod" — Zod validation failed; "filesystem" — I/O error.
  */
 export class ParseError extends SladError {
   readonly path: string | undefined;
-  readonly phase: "yaml" | "zod" | "filesystem";
+  readonly phase: "json" | "zod" | "filesystem";
 
   constructor(
     message: string,
-    opts: { path?: string; phase: "yaml" | "zod" | "filesystem"; cause?: unknown } = { phase: "yaml" },
+    opts: { path?: string; phase: "json" | "zod" | "filesystem"; cause?: unknown } = { phase: "json" },
   ) {
     super(message, "PARSE_ERROR", { path: opts.path, phase: opts.phase });
     this.name = "ParseError";

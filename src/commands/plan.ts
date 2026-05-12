@@ -44,16 +44,10 @@ async function readSnapshot(input: string): Promise<{ content: string; title: st
     throw new Error(`No existe el archivo: ${abs}`);
   }
 
-  if (abs.endsWith(".md")) {
-    try {
-      const parsed = await readArtifact("snapshot", abs);
-      const title = parsed.value.content.match(/^#\s+(.+)$/m)?.[1] ?? path.basename(input);
-      return { content: parsed.value.content, title };
-    } catch {
-      const content = fs.readFileSync(abs, "utf8");
-      const title = content.match(/^#\s+(.+)$/m)?.[1] ?? path.basename(input);
-      return { content, title };
-    }
+  if (abs.endsWith(".json")) {
+    const parsed = await readArtifact("snapshot", abs);
+    const title = parsed.value.content.match(/^#\s+(.+)$/m)?.[1] ?? path.basename(input);
+    return { content: parsed.value.content, title };
   }
 
   const content = fs.readFileSync(abs, "utf8");

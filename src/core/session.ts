@@ -3,8 +3,6 @@ import path from "node:path";
 import { SessionError } from "./errors.js";
 import { SessionState, type SessionArtifactKind, type SessionAnswer } from "./types.js";
 import { artifactDirSync } from "../persistence/layout.js";
-import { renderSession } from "../persistence/render/session.js";
-import { parseSession } from "../persistence/parse/session.js";
 
 const ACTIVE_FILE = ".active-session";
 
@@ -30,7 +28,7 @@ function sessionsRoot(cwd: string): string {
 }
 
 function statePath(id: string, cwd: string): string {
-  return path.join(sessionsRoot(cwd), `${id}.md`);
+  return path.join(sessionsRoot(cwd), `${id}.json`);
 }
 
 function legacyStatePath(id: string, cwd: string): string {
@@ -55,10 +53,8 @@ function loadSessionStrict(id: string, cwd = process.cwd()): SessionState {
 
   try {
     const text = fs.readFileSync(sourcePath, "utf8");
-    if (sourcePath.endsWith(".md")) {
-      return parseSession(text, sourcePath).value;
-    }
-    const raw = JSON.parse(text);
+    const envelope = JSON.parse(text) as Record<string, unknown>;
+    const raw = envelope.value ?? envelope;
     return SessionState.parse(raw);
   } catch (err) {
     throw new SessionError(`Sesión '${id}' tiene estado inválido.`, {
@@ -87,7 +83,14 @@ export function createSession(intent: string, cwd = process.cwd()): SessionState
 export function saveSession(session: SessionState, cwd = process.cwd()): void {
   const p = statePath(session.id, cwd);
   fs.mkdirSync(path.dirname(p), { recursive: true });
-  fs.writeFileSync(p, renderSession(session, { sessionId: session.id }), "utf8");
+  const envelope = {
+    kind: "session",
+    schemaVersion: 1,
+    sessionId: session.id,
+    createdAt: session.createdAt,
+    value: session,
+  };
+  fs.writeFileSync(p, JSON.stringify(envelope, null, 2), "utf8");
 }
 
 export function setActiveSession(id: string, cwd = process.cwd()): void {
@@ -131,8 +134,8 @@ export function listSessions(cwd = process.cwd()): SessionState[] {
   if (!fs.existsSync(root)) return [];
   return fs
     .readdirSync(root)
-    .filter((entry) => entry.endsWith(".md") && !entry.includes("_cli-discovery"))
-    .map((entry) => loadSessionStrict(path.basename(entry, ".md"), cwd))
+    .filter((entry) => entry.endsWith(".json") && !entry.includes("_cli-discovery"))
+    .map((entry) => loadSessionStrict(path.basename(entry, ".json"), cwd))
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
 

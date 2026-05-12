@@ -105,7 +105,7 @@ function parseSnapshotOutput(raw: string): ReturnType<typeof SnapshotOutput.pars
 async function readExploreInput(input: string): Promise<ReturnType<typeof ExploreOutput.parse>> {
   const abs = path.resolve(input);
   if (!fs.existsSync(abs)) throw new Error(`No existe el archivo: ${abs}`);
-  if (abs.endsWith(".md")) return (await readArtifact("explore", abs)).value;
+  if (abs.endsWith(".json")) return (await readArtifact("explore", abs)).value;
 
   const raw = JSON.parse(fs.readFileSync(abs, "utf8"));
   const parsed = ExploreOutput.safeParse(raw);

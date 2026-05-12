@@ -14,7 +14,6 @@ import { projectContextBlock } from "../core/context.js";
 import { log } from "../core/logger.js";
 import { ProviderError, SchemaError, SladError } from "../core/errors.js";
 import { readArtifact, writeArtifact } from "../persistence/index.js";
-import { parseRun } from "../persistence/parse/run.js";
 import { getDocsRoot } from "../persistence/layout.js";
 import { createHarness } from "../harness/index.js";
 import { loadHarnessConfig } from "../harness/config.js";
@@ -106,7 +105,7 @@ async function readPlan(planInput: string | undefined): Promise<ReturnType<typeo
   if (!fs.existsSync(planPath)) {
     throw new Error(`No existe el archivo de tasks: ${planPath}`);
   }
-  if (planPath.endsWith(".md")) {
+  if (planPath.endsWith(".json")) {
     return (await readArtifact("plan", planPath)).value;
   }
   const raw = JSON.parse(fs.readFileSync(planPath, "utf8"));
@@ -399,8 +398,7 @@ async function findCompletedTaskIds(session: SessionState | null, tasks: PlanTas
     if (artifact.kind !== "run" || !artifact.taskId) continue;
     if (!taskIds.has(artifact.taskId)) continue;
     try {
-      const text = fs.readFileSync(artifact.path, "utf8");
-      const { value } = parseRun(text, artifact.path);
+      const { value } = await readArtifact("run", artifact.path);
       if (value.status === "completed") {
         completed.add(artifact.taskId);
       }
@@ -722,23 +720,11 @@ export async function runAutoLoop(
   };
 
   const autoReport = { planSnapshot: plan.snapshot, startedAt, completedAt, durationMs, summary, taskReports };
-  const autoPath = path.join(await getDocsRoot(), "log", "auto", `${timestamp()}-auto.md`);
+  const autoPath = path.join(await getDocsRoot(), "log", "auto", `${timestamp()}-auto.json`);
   fs.mkdirSync(path.dirname(autoPath), { recursive: true });
   fs.writeFileSync(
     autoPath,
-    [
-      "---",
-      "kind: auto-report",
-      "schemaVersion: 1",
-      "---",
-      "",
-      "# Auto Run Report",
-      "",
-      "```json",
-      JSON.stringify(autoReport, null, 2),
-      "```",
-      "",
-    ].join("\n"),
+    JSON.stringify({ kind: "auto-report", schemaVersion: 1, createdAt: completedAt, value: autoReport }, null, 2),
     "utf8",
   );
 

@@ -5,7 +5,7 @@ import kleur from "kleur";
 import { getApiKey, getModel, loadConfig, resolveProvider } from "../core/config.js";
 import { getProvider } from "../models/index.js";
 import { log } from "../core/logger.js";
-import { createSession, saveSession, appendArtifact } from "../core/session.js";
+import { createSession, loadSession, saveSession, appendArtifact } from "../core/session.js";
 import { BudgetTracker } from "../context/budget.js";
 import { Scratchpad } from "../context/scratchpad.js";
 import type { AutoReport } from "../context/types.js";
@@ -30,7 +30,10 @@ import { ExploreOutput, SnapshotOutput, PlanOutput, LearnOutput } from "../core/
 import { readWikiContextCached } from "../agents/explorer.js";
 import { projectContextBlock } from "../core/context.js";
 import { getDocsRoot, listRunsDir } from "../persistence/layout.js";
-import { writeArtifact } from "../persistence/index.js";
+import { writeArtifact, readArtifact } from "../persistence/index.js";
+import { saveAutoCheckpoint, clearAutoCheckpoint, loadAutoCheckpoint } from "./auto-checkpoint.js";
+import { appendBudgetHistory } from "../context/budget-history.js";
+import { select } from "@inquirer/prompts";
 
 export interface AutoOpts {
   provider?: string;
@@ -46,6 +49,12 @@ export interface AutoOpts {
   /** Correr explore+snapshot+plan pero NO run */
   dryRun?: boolean;
   json?: boolean;
+  /** Resumir desde el último checkpoint sin preguntar */
+  resume?: boolean;
+  /** Ignorar checkpoints y empezar de cero */
+  fresh?: boolean;
+  /** Test seam: inject a pre-built provider to avoid real API calls */
+  _provider?: import("../models/index.js").ModelProvider;
 }
 
 type PipelineStage = "explore" | "snapshot" | "plan" | "run" | "learn";
@@ -145,20 +154,27 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
   // ── Setup ─────────────────────────────────────────────────────────────────
   const config = loadConfig();
   const providerName = resolveProvider(opts.provider, opts.agent, config.defaultProvider);
-  const apiKey = getApiKey(providerName);
 
-  if (providerName !== "cli" && !apiKey) {
-    log.error(`No se encontró API key para ${providerName}.`);
-    process.exit(1);
+  let provider: import("../models/index.js").ModelProvider;
+  let model: string | undefined;
+  if (opts._provider) {
+    provider = opts._provider;
+    model = opts.model;
+  } else {
+    const apiKey = getApiKey(providerName);
+    if (providerName !== "cli" && !apiKey) {
+      log.error(`No se encontró API key para ${providerName}.`);
+      process.exit(1);
+    }
+    model = opts.model ?? getModel(providerName);
+    provider = await getProvider(providerName, apiKey ?? undefined);
   }
-
-  const model = opts.model ?? getModel(providerName);
-  const provider = await getProvider(providerName, apiKey ?? undefined);
 
   // ── Fail-fast: Builder needs file-writing capability (unless dry-run) ──
   // Same logic as runCommand. The `cli` provider is exempt because the
   // spawned binary (codex/claude) handles its own file operations.
-  if (!opts.dryRun && providerName !== "cli" && !provider.supportsToolUse) {
+  // Injected test providers (_provider) bypass this check.
+  if (!opts.dryRun && !opts._provider && providerName !== "cli" && !provider.supportsToolUse) {
     throw new ProviderError(
       `El provider "${providerName}" no soporta tool use, así que el Builder no podría escribir archivos. ` +
       `Usá uno de:\n` +
@@ -172,22 +188,60 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
     );
   }
 
+  // ── Checkpoint resume detection ───────────────────────────────────────────
+  let resumeCheckpoint: ReturnType<typeof loadAutoCheckpoint> = null;
+  if (!opts.fresh) {
+    const existing = loadAutoCheckpoint();
+    if (existing && existing.intent === intent) {
+      if (opts.resume) {
+        resumeCheckpoint = existing;
+      } else {
+        const choice = await select({
+          message: `Encontré un pipeline incompleto para esta intención (último stage: ${existing.lastStageCompleted}). ¿Qué hacemos?`,
+          choices: [
+            { name: `Resumir desde ${existing.lastStageCompleted} (continuar donde quedó)`, value: "resume" as const },
+            { name: "Empezar de cero (ignorar checkpoint)", value: "fresh" as const },
+          ],
+          default: "resume",
+        });
+        if (choice === "resume") resumeCheckpoint = existing;
+        else clearAutoCheckpoint();
+      }
+    }
+  } else {
+    clearAutoCheckpoint();
+  }
+
   // ── Session ───────────────────────────────────────────────────────────────
-  let session = createSession(intent);
+  let session = resumeCheckpoint
+    ? (loadSession(resumeCheckpoint.sessionId) ?? createSession(intent))
+    : createSession(intent);
 
   log.title(`Auto · ${providerName}${model ? ` · ${model}` : ""}`);
   log.dim(`  sesión: ${session.id}`);
   log.dim(`  intent: ${intent}`);
+  if (resumeCheckpoint) log.dim(`  resumiendo desde: ${resumeCheckpoint.lastStageCompleted}`);
   if (opts.dryRun) log.dim("  modo: dry-run (solo explore+snapshot+plan)");
   if (opts.maxCost !== undefined) log.dim(`  budget: $${opts.maxCost}`);
   console.log("");
 
   // ── Budget & Scratchpad ───────────────────────────────────────────────────
-  const budget = new BudgetTracker(model ?? "_default", opts.maxCost ?? 1.0);
+  const budget = new BudgetTracker(
+    model ?? "_default",
+    opts.maxCost ?? 1.0,
+    0,
+    resumeCheckpoint?.budgetState,
+  );
   const scratchpad = new Scratchpad({}, session.id, process.cwd());
 
-  const stagesCompleted: PipelineStage[] = [];
-  const artifacts: Record<string, string> = {};
+  const stagesCompleted: PipelineStage[] = resumeCheckpoint
+    ? (resumeCheckpoint.lastStageCompleted === "explore" ? ["explore"]
+      : resumeCheckpoint.lastStageCompleted === "snapshot" ? ["explore", "snapshot"]
+      : resumeCheckpoint.lastStageCompleted === "plan" ? ["explore", "snapshot", "plan"]
+      : resumeCheckpoint.lastStageCompleted === "run" ? ["explore", "snapshot", "plan", "run"]
+      : ["explore", "snapshot", "plan", "run", "learn"])
+    : [];
+  const artifacts: Record<string, string> = resumeCheckpoint ? { ...resumeCheckpoint.artifacts } : {};
   let stopReason: string | undefined;
   let stoppedAt: string | undefined;
 
@@ -199,59 +253,93 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
       if (w) log.warn(`  ⚠ ${w}`);
     };
 
+  /** Retorna true si el stage ya estaba completado (resume) */
+  const alreadyDone = (stage: PipelineStage) => stagesCompleted.includes(stage);
+
+  // ── Load resumed stage outputs ─────────────────────────────────────────────
+  let resumedExploreOutput: ExploreOutput | null = null;
+  let resumedSnapshotOutput: SnapshotOutput | null = null;
+  let resumedPlanOutput: PlanOutput | null = null;
+
+  if (resumeCheckpoint) {
+    if (artifacts["explore"]) {
+      try {
+        resumedExploreOutput = (await readArtifact("explore", artifacts["explore"])).value;
+      } catch { /* ignore — will re-run explore */ }
+    }
+    if (artifacts["snapshot"]) {
+      try {
+        resumedSnapshotOutput = (await readArtifact("snapshot", artifacts["snapshot"])).value;
+      } catch { /* ignore — will re-run snapshot */ }
+    }
+    if (artifacts["plan"]) {
+      try {
+        resumedPlanOutput = (await readArtifact("plan", artifacts["plan"])).value;
+      } catch { /* ignore — will re-run plan */ }
+    }
+  }
+
   try {
     // ══════════════════════════════════════════════════════════════════════════
     // STAGE 1: EXPLORE (con HITL interactivo)
     // ══════════════════════════════════════════════════════════════════════════
-    const exploreSpinner = ora("Explore · analizando intent...").start();
+    let exploreOutput: ExploreOutput;
 
-    const wikiContext = await readWikiContextCached(config.wikiPath);
-    const exploreProjectCtx = projectContextBlock();
-    const exploreUserContent = [
-      wikiContext.text
-        ? `Contexto de la wiki del usuario (solo referencia):\n\n${wikiContext.text}\n\n---\n`
-        : "",
-      exploreProjectCtx,
-      `Intención del usuario:\n${intent}`,
-    ].filter(Boolean).join("\n\n");
-
-    exploreSpinner.stop(); // Stop before hitlLoop (may need interactive I/O)
-
-    const exploreHitl = await hitlLoop(
-      provider,
-      [{ role: "user", content: exploreUserContent }],
-      {
-        stageName: "Explorer",
-        maxRounds: 3,
-        completionOpts: {
-          systemPrompt: EXPLORER_SYSTEM,
-          temperature: 0.5,
-          maxTokens: 2048,
-          model,
-          onUsage: makeUsageCb("explore"),
-        },
-        parse: (raw) => ExploreOutput.parse(JSON.parse(extractJson(raw))),
-        autoResolve: autoResolveExplore,
-      },
-    );
-    const exploreOutput = exploreHitl.output;
-
-    if (exploreOutput.status === "awaiting_human") {
-      log.warn("  Explore · HITL agotado, quedaron preguntas sin resolver");
-      stoppedAt = "explore";
-      stopReason = `HITL sin resolver: ${exploreOutput.questions.map((q) => q.prompt).join("; ")}`;
+    if (alreadyDone("explore") && resumedExploreOutput) {
+      ora().succeed("Explore · retomado desde checkpoint");
+      exploreOutput = resumedExploreOutput;
     } else {
-      ora().succeed(
-        `Explore · ${exploreOutput.approaches.length} enfoques, ${exploreOutput.risks.length} riesgos`,
-      );
-      if (exploreHitl.rounds > 0) log.dim(`    (${exploreHitl.rounds} rondas HITL)`);
-    }
+      const exploreSpinner = ora("Explore · analizando intent...").start();
 
-    const explorePath = await saveStageArtifact("explore", session.id, exploreOutput);
-    session = appendArtifact(session, "explore", explorePath);
-    saveSession(session);
-    stagesCompleted.push("explore");
-    artifacts["explore"] = explorePath;
+      const wikiContext = await readWikiContextCached(config.wikiPath);
+      const exploreProjectCtx = projectContextBlock();
+      const exploreUserContent = [
+        wikiContext.text
+          ? `Contexto de la wiki del usuario (solo referencia):\n\n${wikiContext.text}\n\n---\n`
+          : "",
+        exploreProjectCtx,
+        `Intención del usuario:\n${intent}`,
+      ].filter(Boolean).join("\n\n");
+
+      exploreSpinner.stop(); // Stop before hitlLoop (may need interactive I/O)
+
+      const exploreHitl = await hitlLoop(
+        provider,
+        [{ role: "user", content: exploreUserContent }],
+        {
+          stageName: "Explorer",
+          maxRounds: 3,
+          completionOpts: {
+            systemPrompt: EXPLORER_SYSTEM,
+            temperature: 0.5,
+            maxTokens: 2048,
+            model,
+            onUsage: makeUsageCb("explore"),
+          },
+          parse: (raw) => ExploreOutput.parse(JSON.parse(extractJson(raw))),
+          autoResolve: autoResolveExplore,
+        },
+      );
+      exploreOutput = exploreHitl.output;
+
+      if (exploreOutput.status === "awaiting_human") {
+        log.warn("  Explore · HITL agotado, quedaron preguntas sin resolver");
+        stoppedAt = "explore";
+        stopReason = `HITL sin resolver: ${exploreOutput.questions.map((q) => q.prompt).join("; ")}`;
+      } else {
+        ora().succeed(
+          `Explore · ${exploreOutput.approaches.length} enfoques, ${exploreOutput.risks.length} riesgos`,
+        );
+        if (exploreHitl.rounds > 0) log.dim(`    (${exploreHitl.rounds} rondas HITL)`);
+      }
+
+      const explorePath = await saveStageArtifact("explore", session.id, exploreOutput);
+      session = appendArtifact(session, "explore", explorePath);
+      saveSession(session);
+      stagesCompleted.push("explore");
+      artifacts["explore"] = explorePath;
+      saveAutoCheckpoint({ intent, sessionId: session.id, lastStageCompleted: "explore", artifacts: { ...artifacts }, budgetState: budget.getState(), savedAt: new Date().toISOString() });
+    }
 
     if (exploreOutput.status === "awaiting_human" || budget.isExceeded()) {
       throw new PipelineStop(
@@ -263,59 +351,65 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
     // ══════════════════════════════════════════════════════════════════════════
     // STAGE 2: SNAPSHOT (con HITL interactivo)
     // ══════════════════════════════════════════════════════════════════════════
-    ora("Snapshot · generando mini-spec...").stop();
+    let snapshotOutput: SnapshotOutput;
 
-    const chosenApproach = exploreOutput.approaches[0];
-    const snapshotProjectCtx = projectContextBlock();
-    const snapshotUserContent = [
-      snapshotProjectCtx,
-      `Intent original:\n${exploreOutput.intent}`,
-      `Reframing:\n${exploreOutput.reframing}`,
-      chosenApproach
-        ? `Enfoque elegido — ${chosenApproach.name}:\n${chosenApproach.summary}\nPros: ${chosenApproach.pros.join("; ")}\nCons: ${chosenApproach.cons.join("; ")}`
-        : "",
-      exploreOutput.risks.length
-        ? `Riesgos conocidos:\n- ${exploreOutput.risks.join("\n- ")}`
-        : "",
-      exploreOutput.openQuestions.length
-        ? `Preguntas abiertas:\n- ${exploreOutput.openQuestions.join("\n- ")}`
-        : "",
-      `Next step sugerido: ${exploreOutput.recommendedNext}`,
-    ].filter(Boolean).join("\n\n");
-
-    const snapshotHitl = await hitlLoop(
-      provider,
-      [{ role: "user", content: snapshotUserContent }],
-      {
-        stageName: "Snapshot",
-        maxRounds: 3,
-        completionOpts: {
-          systemPrompt: SNAPSHOT_SYSTEM,
-          temperature: 0.3,
-          maxTokens: 1500,
-          model,
-          onUsage: makeUsageCb("snapshot"),
-        },
-        parse: (raw) => SnapshotOutput.parse(JSON.parse(extractJson(raw))),
-        autoResolve: autoResolveGeneric,
-      },
-    );
-    const snapshotOutput = snapshotHitl.output;
-
-    if (snapshotOutput.status === "awaiting_human") {
-      log.warn("  Snapshot · HITL agotado, quedaron preguntas sin resolver");
-      stoppedAt = "snapshot";
-      stopReason = `HITL sin resolver en snapshot`;
+    if (alreadyDone("snapshot") && resumedSnapshotOutput) {
+      ora().succeed("Snapshot · retomado desde checkpoint");
+      snapshotOutput = resumedSnapshotOutput;
     } else {
-      ora().succeed("Snapshot · mini-spec lista");
-      if (snapshotHitl.rounds > 0) log.dim(`    (${snapshotHitl.rounds} rondas HITL)`);
-    }
+      const chosenApproach = exploreOutput.approaches[0];
+      const snapshotProjectCtx = projectContextBlock();
+      const snapshotUserContent = [
+        snapshotProjectCtx,
+        `Intent original:\n${exploreOutput.intent}`,
+        `Reframing:\n${exploreOutput.reframing}`,
+        chosenApproach
+          ? `Enfoque elegido — ${chosenApproach.name}:\n${chosenApproach.summary}\nPros: ${chosenApproach.pros.join("; ")}\nCons: ${chosenApproach.cons.join("; ")}`
+          : "",
+        exploreOutput.risks.length
+          ? `Riesgos conocidos:\n- ${exploreOutput.risks.join("\n- ")}`
+          : "",
+        exploreOutput.openQuestions.length
+          ? `Preguntas abiertas:\n- ${exploreOutput.openQuestions.join("\n- ")}`
+          : "",
+        `Next step sugerido: ${exploreOutput.recommendedNext}`,
+      ].filter(Boolean).join("\n\n");
 
-    const snapshotPath = await saveStageArtifact("snapshot", session.id, snapshotOutput);
-    session = appendArtifact(session, "snapshot", snapshotPath);
-    saveSession(session);
-    stagesCompleted.push("snapshot");
-    artifacts["snapshot"] = snapshotPath;
+      const snapshotHitl = await hitlLoop(
+        provider,
+        [{ role: "user", content: snapshotUserContent }],
+        {
+          stageName: "Snapshot",
+          maxRounds: 3,
+          completionOpts: {
+            systemPrompt: SNAPSHOT_SYSTEM,
+            temperature: 0.3,
+            maxTokens: 1500,
+            model,
+            onUsage: makeUsageCb("snapshot"),
+          },
+          parse: (raw) => SnapshotOutput.parse(JSON.parse(extractJson(raw))),
+          autoResolve: autoResolveGeneric,
+        },
+      );
+      snapshotOutput = snapshotHitl.output;
+
+      if (snapshotOutput.status === "awaiting_human") {
+        log.warn("  Snapshot · HITL agotado, quedaron preguntas sin resolver");
+        stoppedAt = "snapshot";
+        stopReason = `HITL sin resolver en snapshot`;
+      } else {
+        ora().succeed("Snapshot · mini-spec lista");
+        if (snapshotHitl.rounds > 0) log.dim(`    (${snapshotHitl.rounds} rondas HITL)`);
+      }
+
+      const snapshotPath = await saveStageArtifact("snapshot", session.id, snapshotOutput);
+      session = appendArtifact(session, "snapshot", snapshotPath);
+      saveSession(session);
+      stagesCompleted.push("snapshot");
+      artifacts["snapshot"] = snapshotPath;
+      saveAutoCheckpoint({ intent, sessionId: session.id, lastStageCompleted: "snapshot", artifacts: { ...artifacts }, budgetState: budget.getState(), savedAt: new Date().toISOString() });
+    }
 
     if (snapshotOutput.status === "awaiting_human" || budget.isExceeded()) {
       throw new PipelineStop(
@@ -327,47 +421,53 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
     // ══════════════════════════════════════════════════════════════════════════
     // STAGE 3: PLAN (con HITL interactivo)
     // ══════════════════════════════════════════════════════════════════════════
-    ora("Plan · generando tasks...").stop();
+    let planOutput: PlanOutput;
 
-    const planProjectCtx = projectContextBlock();
-    const planUserContent = [
-      planProjectCtx,
-      `Snapshot:\n\n${snapshotOutput.content}`,
-    ].filter(Boolean).join("\n\n");
-
-    const planHitl = await hitlLoop(
-      provider,
-      [{ role: "user", content: planUserContent }],
-      {
-        stageName: "Planner",
-        maxRounds: 3,
-        completionOpts: {
-          systemPrompt: PLANNER_SYSTEM,
-          temperature: 0.2,
-          maxTokens: 2500,
-          model,
-          onUsage: makeUsageCb("plan"),
-        },
-        parse: (raw) => PlanOutput.parse(JSON.parse(extractJson(raw))),
-        autoResolve: autoResolvePlan,
-      },
-    );
-    const planOutput = planHitl.output;
-
-    if (planOutput.status === "awaiting_human") {
-      log.warn("  Plan · HITL agotado, quedaron preguntas sin resolver");
-      stoppedAt = "plan";
-      stopReason = `HITL sin resolver en plan`;
+    if (alreadyDone("plan") && resumedPlanOutput) {
+      ora().succeed("Plan · retomado desde checkpoint");
+      planOutput = resumedPlanOutput;
     } else {
-      ora().succeed(`Plan · ${planOutput.tasks.length} tareas generadas`);
-      if (planHitl.rounds > 0) log.dim(`    (${planHitl.rounds} rondas HITL)`);
-    }
+      const planProjectCtx = projectContextBlock();
+      const planUserContent = [
+        planProjectCtx,
+        `Snapshot:\n\n${snapshotOutput.content}`,
+      ].filter(Boolean).join("\n\n");
 
-    const planPath = await saveStageArtifact("plan", session.id, planOutput);
-    session = appendArtifact(session, "plan", planPath);
-    saveSession(session);
-    stagesCompleted.push("plan");
-    artifacts["plan"] = planPath;
+      const planHitl = await hitlLoop(
+        provider,
+        [{ role: "user", content: planUserContent }],
+        {
+          stageName: "Planner",
+          maxRounds: 3,
+          completionOpts: {
+            systemPrompt: PLANNER_SYSTEM,
+            temperature: 0.2,
+            maxTokens: 2500,
+            model,
+            onUsage: makeUsageCb("plan"),
+          },
+          parse: (raw) => PlanOutput.parse(JSON.parse(extractJson(raw))),
+          autoResolve: autoResolvePlan,
+        },
+      );
+      planOutput = planHitl.output;
+
+      if (planOutput.status === "awaiting_human") {
+        log.warn("  Plan · HITL agotado, quedaron preguntas sin resolver");
+        stoppedAt = "plan";
+        stopReason = `HITL sin resolver en plan`;
+      } else {
+        ora().succeed(`Plan · ${planOutput.tasks.length} tareas generadas`);
+        if (planHitl.rounds > 0) log.dim(`    (${planHitl.rounds} rondas HITL)`);
+      }
+
+      const planPath = await saveStageArtifact("plan", session.id, planOutput);
+      session = appendArtifact(session, "plan", planPath);
+      saveSession(session);
+      stagesCompleted.push("plan");
+      artifacts["plan"] = planPath;
+      saveAutoCheckpoint({ intent, sessionId: session.id, lastStageCompleted: "plan", artifacts: { ...artifacts }, budgetState: budget.getState(), savedAt: new Date().toISOString() });
+    }
 
     if (planOutput.status === "awaiting_human" || budget.isExceeded()) {
       throw new PipelineStop(
@@ -417,6 +517,7 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
 
     stagesCompleted.push("run");
     artifacts["run"] = await listRunsDir();
+    saveAutoCheckpoint({ intent, sessionId: session.id, lastStageCompleted: "run", artifacts: { ...artifacts }, budgetState: budget.getState(), savedAt: new Date().toISOString() });
 
     if (budget.isExceeded()) {
       throw new PipelineStop("run", "Budget excedido durante run");
@@ -497,6 +598,24 @@ export async function autoCommand(intent: string, opts: AutoOpts): Promise<void>
   };
 
   const reportPath = await saveAutoReport(report);
+
+  // Clear checkpoint when pipeline completes fully (no partial/failed)
+  if (pipelineStatus === "completed") clearAutoCheckpoint();
+
+  // Persist budget history for cross-session stats
+  const budgetFinal = budget.getState();
+  appendBudgetHistory({
+    sessionId: session.id,
+    intent,
+    startedAt,
+    completedAt,
+    model: model ?? "_default",
+    provider: providerName,
+    inputTokens: budgetFinal.inputTokens,
+    outputTokens: budgetFinal.outputTokens,
+    estimatedCostUsd: budgetFinal.estimatedCostUsd,
+    stagesCompleted,
+  });
 
   // Print summary
   console.log("");

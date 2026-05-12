@@ -6,7 +6,7 @@ describe("generateInventory", () => {
   it("detecta todos los providers existentes", () => {
     const inv = generateInventory();
     const names = inv.providers.map((p) => p.name).sort();
-    assert.deepStrictEqual(names, ["anthropic", "cli", "cli-discovery", "gemini", "openai", "tool-loop"]);
+    assert.deepStrictEqual(names, ["anthropic", "cli", "cli-discovery", "gemini", "openai", "retry", "timeout", "tool-loop"]);
   });
 
   it("clasifica correctamente el tipo de cada provider", () => {

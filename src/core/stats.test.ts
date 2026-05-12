@@ -51,11 +51,38 @@ test("getProjectStats aggregates persisted sessions from an isolated cwd", () =>
     saveSession(session("s1", ["run", "learn", "snapshot"]), cwd);
     saveSession(session("s2", ["plan", "run", "evolve", "learn"]), cwd);
 
-    assert.deepEqual(getProjectStats(cwd), {
-      sessions: 2,
-      runs: 2,
-      learnings: 2,
+    const stats = getProjectStats(cwd);
+    assert.equal(stats.sessions, 2);
+    assert.equal(stats.runs, 2);
+    assert.equal(stats.learnings, 2);
+    // No budget history written → zeros
+    assert.deepEqual(stats.budget, {
+      totalRuns: 0,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalEstimatedCostUsd: 0,
     });
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("getProjectStats includes budget totals from budget-history.jsonl", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "slad-stats-budget-"));
+  try {
+    const { appendBudgetHistory } = await import("../context/budget-history.js");
+    appendBudgetHistory({
+      sessionId: "s1", intent: "x", startedAt: "2026-01-01T00:00:00Z",
+      completedAt: "2026-01-01T00:01:00Z", model: "m", provider: "p",
+      inputTokens: 1000, outputTokens: 500, estimatedCostUsd: 0.01,
+      stagesCompleted: ["explore"],
+    }, cwd);
+
+    const stats = getProjectStats(cwd);
+    assert.equal(stats.budget.totalRuns, 1);
+    assert.equal(stats.budget.totalInputTokens, 1000);
+    assert.equal(stats.budget.totalOutputTokens, 500);
+    assert.ok(Math.abs(stats.budget.totalEstimatedCostUsd - 0.01) < 0.0001);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

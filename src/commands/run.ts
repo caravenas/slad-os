@@ -12,7 +12,7 @@ import type { BudgetTracker } from "../context/budget.js";
 import { collectAnswers, formatAnswersForPrompt, printHitlHeader } from "../core/hitl.js";
 import { projectContextBlock } from "../core/context.js";
 import { log } from "../core/logger.js";
-import { ProviderError, SchemaError, SladError, isRetryable } from "../core/errors.js";
+import { ProviderError, SchemaError, SladError } from "../core/errors.js";
 import { readArtifact, writeArtifact } from "../persistence/index.js";
 import { parseRun } from "../persistence/parse/run.js";
 import { getDocsRoot } from "../persistence/layout.js";
@@ -63,6 +63,10 @@ export interface RunOpts {
    * - No se pregunta resume/fresh al detectar completadas previas
    */
   nonInteractive?: boolean;
+  /** Ejecutar tareas independientes del DAG en paralelo (solo en nonInteractive). Default: false */
+  parallel?: boolean;
+  /** Máximo de tareas paralelas simultáneas. Default: 3 */
+  maxParallel?: number;
   /** Scratchpad para offloading de tool results grandes (usado en auto pipeline) */
   scratchpad?: Scratchpad | null;
   /** Budget tracker para visibilidad de costo (usado en auto pipeline) */
@@ -300,11 +304,6 @@ async function executeTask(
         });
       }
     } catch (err) {
-      if (isRetryable(err) && rounds < maxRounds) {
-        spinner.text = `${task.id} · rate limited, reintentando en 5s...`;
-        await new Promise((r) => setTimeout(r, 5000));
-        continue;
-      }
       spinner.fail(`${task.id} · falló la llamada al provider`);
       throw err;
     }
@@ -379,44 +378,7 @@ async function executeTask(
 
 // ─── topological sort & DAG helpers ──────────────────────────────────────────
 
-type TaskStatus = "pending" | "done" | "skipped" | "failed";
-const PRIORITY_ORDER = { high: 0, medium: 1, low: 2 } as const;
-
-function nextRunnableTask(
-  tasks: PlanTask[],
-  state: Map<string, TaskStatus>,
-): PlanTask | null {
-  const runnable = tasks.filter(
-    (t) =>
-      (state.get(t.id) ?? "pending") === "pending" &&
-      t.dependsOn.every((dep) => state.get(dep) === "done"),
-  );
-  if (runnable.length === 0) return null;
-  return runnable.sort(
-    (a, b) =>
-      PRIORITY_ORDER[a.priority] - PRIORITY_ORDER[b.priority] ||
-      tasks.indexOf(a) - tasks.indexOf(b),
-  )[0];
-}
-
-function autoSkipDependents(
-  tasks: PlanTask[],
-  state: Map<string, TaskStatus>,
-  skippedId: string,
-): string[] {
-  const skipped: string[] = [];
-  const cascade = (id: string) => {
-    for (const t of tasks) {
-      if (t.dependsOn.includes(id) && (state.get(t.id) ?? "pending") === "pending") {
-        state.set(t.id, "skipped");
-        skipped.push(t.id);
-        cascade(t.id);
-      }
-    }
-  };
-  cascade(skippedId);
-  return skipped;
-}
+import { getParallelRunnableTasks, autoSkipDependents, type TaskStatus } from "./dag.js";
 
 // ─── auto-loop ────────────────────────────────────────────────────────────────
 
@@ -461,6 +423,8 @@ export async function runAutoLoop(
   const { tasks } = plan;
   const maxRounds = opts.maxRounds ?? DEFAULT_MAX_ROUNDS;
   const maxTasks = opts.maxTasks ?? DEFAULT_MAX_TASKS;
+  const parallelMode = (opts.parallel ?? false) && (opts.nonInteractive ?? false);
+  const maxParallel = opts.maxParallel ?? 3;
   const startedAt = new Date().toISOString();
   const startMs = Date.now();
 
@@ -528,8 +492,76 @@ export async function runAutoLoop(
   console.log("");
 
   while (executions < maxTasks) {
-    const task = nextRunnableTask(tasks, state);
-    if (!task) break;
+    const runnableAll = getParallelRunnableTasks(tasks, state);
+    if (runnableAll.length === 0) break;
+
+    // Parallel mode: run a batch of independent tasks concurrently (nonInteractive only)
+    if (parallelMode && runnableAll.length > 1) {
+      const batchSize = Math.min(runnableAll.length, maxParallel, maxTasks - executions);
+      const batch = runnableAll.slice(0, batchSize);
+      log.dim(`  [paralelo] ejecutando ${batch.map((t) => t.id).join(", ")}`);
+
+      const batchResults = await Promise.allSettled(
+        batch.map(async (batchTask) => {
+          const sessionCtx = currentSession ? sessionContextBlock(currentSession) : "";
+          const taskStart = Date.now();
+          const result = await executeTask(
+            batchTask,
+            plan,
+            provider,
+            model,
+            maxRounds,
+            sessionCtx,
+            path.join(process.cwd(), "runs"),
+            harness,
+            useTools,
+            { scratchpad: opts.scratchpad, onUsage: opts.onUsage, sessionId: currentSession?.id },
+          );
+          return { batchTask, result, taskStart };
+        }),
+      );
+
+      // Process results sequentially to avoid state race conditions
+      for (const settled of batchResults) {
+        executions++;
+        if (settled.status === "rejected") {
+          const batchTask = batch[batchResults.indexOf(settled)]!;
+          log.error(`Error ejecutando ${batchTask.id}: ${(settled.reason as Error).message}`);
+          state.set(batchTask.id, "failed");
+          taskReports.push({ taskId: batchTask.id, title: batchTask.title, status: "failed", durationMs: 0 });
+          log.dim(`  auto: skip ${batchTask.id} (error de ejecución)`);
+          const cascaded = autoSkipDependents(tasks, state, batchTask.id);
+          if (cascaded.length) log.dim(`  Auto-skip dependientes: ${cascaded.join(", ")}`);
+          continue;
+        }
+
+        const { batchTask, result, taskStart } = settled.value;
+        const durationMs = Date.now() - taskStart;
+        const { output, outPath, humanAnswers } = result;
+
+        if (currentSession) {
+          let updated = appendArtifact(currentSession, "run", outPath, batchTask.id);
+          if (Object.keys(humanAnswers).length > 0) updated = appendAnswers(updated, batchTask.id, humanAnswers);
+          saveSession(updated);
+          currentSession = updated;
+        }
+
+        if (output.status === "completed") {
+          state.set(batchTask.id, "done");
+          taskReports.push({ taskId: batchTask.id, title: batchTask.title, status: "done", durationMs, output });
+        } else {
+          state.set(batchTask.id, "failed");
+          taskReports.push({ taskId: batchTask.id, title: batchTask.title, status: "failed", durationMs, output });
+          log.dim(`  auto: skip ${batchTask.id} (${output.status})`);
+          const cascaded = autoSkipDependents(tasks, state, batchTask.id);
+          if (cascaded.length) log.dim(`  Auto-skip dependientes: ${cascaded.join(", ")}`);
+        }
+      }
+      continue;
+    }
+
+    // Sequential mode (default)
+    const task = runnableAll[0]!;
 
     const sessionCtx = currentSession ? sessionContextBlock(currentSession) : "";
     const taskStart = Date.now();

@@ -26,13 +26,13 @@ export class BudgetTracker {
   private state: BudgetState;
   private model: string;
 
-  constructor(model: string, maxCostUsd = 0, maxTokens = 0) {
+  constructor(model: string, maxCostUsd = 0, maxTokens = 0, initialState?: Partial<BudgetState>) {
     this.model = model;
     this.state = {
-      inputTokens: 0,
-      outputTokens: 0,
-      estimatedCostUsd: 0,
-      byStage: {},
+      inputTokens: initialState?.inputTokens ?? 0,
+      outputTokens: initialState?.outputTokens ?? 0,
+      estimatedCostUsd: initialState?.estimatedCostUsd ?? 0,
+      byStage: initialState?.byStage ?? {},
       maxCostUsd,
       maxTokens,
     };

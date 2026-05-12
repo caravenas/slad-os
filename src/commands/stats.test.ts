@@ -60,13 +60,14 @@ test("stats --json prints parseable numeric totals from isolated sessions", { co
     const output = await captureStdout(() => statsCommand({ json: true }));
     const parsed = JSON.parse(output) as Record<string, unknown>;
 
-    assert.deepEqual(Object.keys(parsed).sort(), ["learnings", "runs", "sessions"]);
+    assert.deepEqual(Object.keys(parsed).sort(), ["budget", "learnings", "runs", "sessions"]);
     assert.equal(parsed.sessions, 2);
     assert.equal(parsed.runs, 2);
     assert.equal(parsed.learnings, 2);
     assert.equal(typeof parsed.sessions, "number");
     assert.equal(typeof parsed.runs, "number");
     assert.equal(typeof parsed.learnings, "number");
+    assert.equal(typeof parsed.budget, "object");
   } finally {
     process.chdir(originalCwd);
     fs.rmSync(project, { recursive: true, force: true });

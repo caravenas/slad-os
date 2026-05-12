@@ -121,6 +121,8 @@ program
   .option("--max-rounds <n>", "Máximo de rounds HITL antes de marcar blocked (default: 3)", parseInt)
   .option("--auto", "Ejecutar el DAG completo de tareas automáticamente")
   .option("--max-tasks <n>", "Budget de ejecuciones en modo --auto (default: 10)", parseInt)
+  .option("--parallel", "Ejecutar tareas independientes del DAG en paralelo (requiere --auto, solo con --no-tools o modo no-interactivo)")
+  .option("--max-parallel <n>", "Máximo de tareas paralelas simultáneas (default: 3)", parseInt)
   .option("--json", "Imprimir JSON plano en stdout en lugar del resumen legible")
   .option("--skip-session", "Ignorar sesión activa (comportamiento v0.1.0)")
   .option("--harness <mode>", "Modo del arnés de seguridad (off | on | strict)", "off")
@@ -172,6 +174,8 @@ program
   .option("--harness <mode>", "Modo del arnés de seguridad (off | on | strict)", "on")
   .option("--dry-run", "Solo explore+snapshot+plan, sin ejecutar código")
   .option("--skip-learn", "No ejecutar learn al final")
+  .option("--resume", "Resumir desde el último checkpoint sin preguntar")
+  .option("--fresh", "Ignorar checkpoints y empezar de cero")
   .option("--json", "Output JSON del report final")
   .action(async (intentParts: string[], opts) => {
     await autoCommand(intentParts.join(" "), {
@@ -183,6 +187,8 @@ program
       harness: opts.harness,
       dryRun: opts.dryRun,
       skipLearn: opts.skipLearn,
+      resume: opts.resume,
+      fresh: opts.fresh,
       json: opts.json,
     });
   });

@@ -1,6 +1,6 @@
 # SLAD OS Roadmap & Status
 
-> Última actualización: 2026-05-11
+> Última actualización: 2026-05-12
 
 ## Criterios de Madurez (Glosario)
 
@@ -17,22 +17,22 @@
 
 | Componente | Estado | Qué hay | Qué falta | Prioridad |
 |------------|--------|---------|-----------|-----------|
-| **Fase 1 — Pipeline tipado** | [Stable] | Los 6 stages implementados (`explore` → `snapshot` → `plan` → `run` → `learn` → `evolve`) + `chat` REPL + `auto` (pipeline completo intent→código); schemas Zod completos en `core/types.ts`; extracción JSON fence-aware; persistence layer con Markdown+YAML frontmatter (`persistence/`); `stats` command. | Suite E2E sobre repo fixture reproducible; smoke test del binario `slad`. | Alta |
+| **Fase 1 — Pipeline tipado** | [Stable] | Los 6 stages implementados (`explore` → `snapshot` → `plan` → `run` → `learn` → `evolve`) + `chat` REPL + `auto` (pipeline completo intent→código); schemas Zod completos en `core/types.ts`; extracción JSON fence-aware; persistence layer con Markdown+YAML frontmatter (`persistence/`); `stats` command; **suite E2E sobre repo fixture con mock provider** (`src/tests/e2e-auto-dry-run.test.ts`). | Smoke test del binario `slad` compilado. | Alta |
 | **Comando: explore** | [Stable] | Análisis de intención, reframing, enfoques con pros/cons, riesgos, open questions. Wiki context injection opcional (`SLAD_WIKI_PATH`). | Refinamiento de prompts según feedback de uso real. | Baja |
 | **Comando: snapshot** | [Beta] | Generación de mini-spec `.md` a partir de explore o intención directa; template Markdown en `src/templates/`. | Template dinámico por lenguaje/stack; selección automática de approach. | Media |
 | **Comando: plan** | [Stable] | Conversión de Snapshot a `PlanTask[]` con DAG de dependencias; `recommendedFirstTask`; plan-level verification y risks. | Validación de dependencias circulares; re-planning parcial tras fallos. | Baja |
-| **Comando: run** | [Beta] | Builder + Reviewer loop con HITL; `--auto` con ejecución DAG topológica, resume detection, cascade de skips; follow-up execution; git change detection post-task; harness integration; **tool use real** (readFile, writeFile, listDir, grep, exec, git ops) vía tool-loop provider-agnostic; scratchpad para offloading de results grandes. | Retry con backoff exponencial en errores de red; parallel task execution cuando el DAG lo permita. | Alta |
+| **Comando: run** | [Beta] | Builder + Reviewer loop con HITL; `--auto` con ejecución DAG topológica, resume detection, cascade de skips; follow-up execution; git change detection post-task; harness integration; **tool use real** (readFile, writeFile, listDir, grep, exec, git ops) vía tool-loop provider-agnostic; scratchpad para offloading de results grandes; **`--parallel` / `--max-parallel`** con `Promise.allSettled` sobre ramas independientes del DAG (`dag.ts`). | Streaming de resultados durante tool loops; timeout por tarea individual. | Alta |
 | **Comando: learn** | [Beta] | Extracción de decisiones, errores, patrones, follow-ups; generación consolidada (`taskId: "all"`) para auto pipeline; output Markdown persistido. | Tests de integración robustos; wiki persistence automático (hoy depende de `evolve --apply-wiki`). | Media |
 | **Comando: evolve** | [Beta] | Propuesta de updates a wiki/AGENTS.md; `--apply-wiki` para append automático; output Markdown con proposed changes. | Feedback loop para medir impacto real de las propuestas; diff preview interactivo antes de aplicar. | Media |
-| **Comando: auto** | [Beta] | Pipeline completo intent→código en un solo comando; `--dry-run` (explore+snapshot+plan sin ejecutar); `--max-cost` budget cap; `--max-tasks` limit; `--skip-learn`; `--harness`; HITL auto-resolve con heurísticas (`hitl-auto-resolve.ts`); BudgetTracker con pricing por modelo; Scratchpad context offloading; AutoReport con status/stages/budget. | Streaming feedback durante stages largos; resume de auto pipelines interrumpidos. | Alta |
+| **Comando: auto** | [Beta] | Pipeline completo intent→código en un solo comando; `--dry-run` (explore+snapshot+plan sin ejecutar); `--max-cost` budget cap; `--max-tasks` limit; `--skip-learn`; `--harness`; HITL auto-resolve con heurísticas (`hitl-auto-resolve.ts`); BudgetTracker con pricing por modelo; Scratchpad context offloading; AutoReport con status/stages/budget; **`--resume` / `--fresh`** con checkpoint por stage en `.slad-os/auto-checkpoint.json` (detecta pipeline interrumpido y retoma desde el último stage completo); **budget history** persistida en `.slad-os/budget-history.jsonl`. | Streaming feedback durante stages largos. | Alta |
 | **Comando: chat** | [Stable] | REPL conversacional con parseAction/suggestNext; soporte español/inglés; gestión de sesión integrada. | Historial persistente cross-session; modo no-interactivo (pipe input). | Baja |
-| **Comando: stats** | [Beta] | Totales de sesiones, runs y learnings por proyecto; output `--json`. | Breakdown por provider/modelo; costo acumulado; timeline. | Baja |
+| **Comando: stats** | [Beta] | Totales de sesiones, runs y learnings por proyecto; output `--json`; **Budget history**: total de auto runs, tokens y costo estimado acumulado leído desde `budget-history.jsonl`. | Breakdown por provider/modelo; timeline de runs. | Baja |
 
 ## Infraestructura (Fases 2–5)
 
 | Componente | Estado | Qué hay | Qué falta | Prioridad |
 |------------|--------|---------|-----------|-----------|
-| **Fase 2 — Multi-provider** | [Stable] | `ModelProvider` interface + factory; providers `anthropic`, `openai`, `gemini`, `cli` (codex/claude subprocess); `ProviderError` con `retryable` flag (429/529/500); `CliCandidate` discovery (`cli-discovery.ts`) con cache; `completeWithTools()` para Anthropic y OpenAI; `supportsToolUse` flag por provider. | Backoff exponencial configurable; fallback automático provider-to-provider; streaming para feedback en vivo. | Media |
+| **Fase 2 — Multi-provider** | [Stable] | `ModelProvider` interface + factory; providers `anthropic`, `openai`, `gemini`, `cli` (codex/claude subprocess); `ProviderError` con `retryable` flag (429/529/500); `CliCandidate` discovery (`cli-discovery.ts`) con cache; `completeWithTools()` para Anthropic y OpenAI; `supportsToolUse` flag por provider; **retry con backoff exponencial** (`retry.ts`: jitter ±25%, cap 16 s, solo en errores retryable); **timeouts configurables** por llamada API vía `SLAD_API_TIMEOUT_MS` (`timeout.ts`). | Fallback automático provider-to-provider; streaming para feedback en vivo. | Media |
 | **Fase 3 — Sesiones y HITL** | [Beta] | `SessionState` CRUD + `appendArtifact()`; loop HITL universal con `@inquirer/prompts`; `hitl-loop.ts` genérico para auto pipeline; `hitl-auto-resolve.ts` con heurísticas por stage; `AGENTS.md` injection; `inventory.ts` para proyecto; `humanAnswers` acumulativos en sesión; `session start/list/use/show`. | `session restore` robusto; `session diff`; branch/fork de sesión; persistencia multi-proceso. | Media |
 | **Fase 4 — Cache & observabilidad** | [Stable] | Cache content-based en `~/.slad-os/cache/v1` (store, keys, invalidation, reusable); logger configurable (`SLAD_LOG_LEVEL`, timestamps, debug); `project-id` determinista; `BudgetTracker` con token/cost tracking por stage y modelo. | Métricas de hit rate persistidas; instrumentación OTEL; correlation IDs cross-stage; export de trazas. | Media |
 | **Fase 5 — Harness de seguridad** | [Beta] | Clasificador 3-tier (`read`/`workspace`/`full`) en `classifier.ts`; `AuditLogger` LDJSON append-only; `approval.ts` HITL para acciones peligrosas; modes `off`/`on`/`strict` vía `--harness`; config loader `.slad-os/harness.json`; integración con `ToolExecutor` (el harness intercepta tool calls). | Sandboxing real (Docker/Firejail); DSL de políticas declarativas; allowlist/blocklist por proyecto; tests de evasión. | Alta |
@@ -51,7 +51,7 @@
 | Componente | Estado | Qué hay | Qué falta | Prioridad |
 |------------|--------|---------|-----------|-----------|
 | **Scratchpad** | [Beta] | Filesystem-backed external memory; threshold por chars/lines; summary generation; re-read hint para el LLM; session-scoped storage en `.slad-os/scratch/`. | Compresión de rounds antiguos (`maxFullRoundsInContext`); cleanup automático post-sesión. | Media |
-| **Budget tracker** | [Beta] | Token counting por stage; cost estimation con pricing table (Anthropic/OpenAI/Gemini/MiniMax); warnings al 80%; abort on exceed; desglose `byStage`. | Persistencia de budget history; pricing auto-update; alertas configurables. | Media |
+| **Budget tracker** | [Beta] | Token counting por stage; cost estimation con pricing table (Anthropic/OpenAI/Gemini/MiniMax); warnings al 80%; abort on exceed; desglose `byStage`; **`initialState` para restaurar budget desde checkpoint**. | Pricing auto-update; alertas configurables. | Media |
 | **Project context** | [Stable] | `AGENTS.md` injection automática (limit 8K chars); `projectContextBlock()` para todos los agentes; `core/inventory.ts` para describir el proyecto al LLM. | Indexación dinámica del codebase (inyectar archivos relevantes por tarea automáticamente sin depender de `AGENTS.md` manual). | Alta |
 
 ## Persistence Layer (nueva fase)
@@ -87,12 +87,12 @@ Production blockers que separan un proyecto interesante de uno usable por tercer
 1. ~~**Determinismo y reproducibilidad**~~ ✅ — `temperature: 0.2` en stages críticos (`run`); cache content-based para idempotencia parcial.
 2. ~~**Idempotencia del pipeline**~~ ✅ — Cache content-based resuelve la mayoría de los casos; re-ejecución produce cache hits.
 3. ~~**Manejo de fallos parciales**~~ ✅ — Resume detection en `run --auto`; cascade de skips en dependientes; retry/skip/abort interactivo; auto-skip en modo no-interactivo.
-4. **Timeouts y circuit breakers** — `SLAD_CLI_TIMEOUT_MS` existe para el CLI provider. Falta: cap por stage para providers API, límite global por sesión.
+4. ~~**Timeouts y circuit breakers**~~ ✅ — `SLAD_CLI_TIMEOUT_MS` para CLI provider; `SLAD_API_TIMEOUT_MS` para providers API vía `timeout.ts` + `retryWithBackoff()` en Anthropic/OpenAI/Gemini. Falta: límite global por sesión.
 
 ## B. Costos y consumo
 
 5. ~~**Budget caps**~~ ✅ — `BudgetTracker` con `--max-cost` en `slad auto`; warning al 80%; abort on exceed; pricing table multi-modelo.
-6. **Token telemetry persistente** — El budget tracker calcula en runtime pero no persiste histórico entre sesiones. Falta: log de tokens por stage/provider/model para análisis de cost-per-task.
+6. ~~**Token telemetry persistente**~~ ✅ — `budget-history.jsonl` por proyecto: cada run de `slad auto` appenda tokens/costo/provider/model/stages; `slad stats` muestra totales históricos.
 7. **Cache aggressiveness configurable** — Hoy es `on` o `off` implícito. Falta: flag `--cache=strict|loose|off`.
 
 ## C. Observabilidad
@@ -133,7 +133,7 @@ Production blockers que separan un proyecto interesante de uno usable por tercer
 - [x] `auto` — pipeline intent→código en un comando con budget, scratchpad y auto-resolve HITL
 - [x] `chat` — REPL conversacional con sugerencias de siguiente paso
 - [x] `session` — gestión de sesiones multi-artefacto con contexto persistente
-- [x] `stats` — totales de sesiones, runs y learnings
+- [x] `stats` — totales de sesiones, runs, learnings y **costo histórico acumulado**
 - [x] HITL universal — todos los agentes pausan y piden input; auto-resolve en modo auto
 - [x] Tool use real — readFile, writeFile, listDir, grep, exec, git ops vía tool-loop genérico
 - [x] Scratchpad — offloading de tool results grandes a disco con summary en context
@@ -152,6 +152,13 @@ Production blockers que separan un proyecto interesante de uno usable por tercer
 - [x] Logger configurable — niveles, timestamps, debug mode, stack traces
 - [x] README completo — docs de uso, arquitectura, config, HITL, cache
 - [x] `--dry-run` en auto — explore+snapshot+plan sin ejecutar código
+- [x] **Retry con backoff exponencial** — `retry.ts` con jitter ±25% y cap 16 s; wired en Anthropic, OpenAI y Gemini
+- [x] **Timeouts configurables vía `SLAD_API_TIMEOUT_MS`** — `timeout.ts` integrado en todos los providers API
+- [x] **Ejecución paralela de tareas independientes del DAG** — `dag.ts` + `run --parallel --max-parallel N`
+- [x] **Checkpoint del pipeline auto** — `.slad-os/auto-checkpoint.json`; guarda estado tras cada stage
+- [x] **Resume de pipeline interrumpido** — `slad auto --resume / --fresh`; retoma desde el último stage completo sin repetir LLM calls
+- [x] **Budget history persistente** — `.slad-os/budget-history.jsonl`; `slad stats` muestra totales acumulados
+- [x] **Suite E2E con mock provider** — `src/tests/e2e-auto-dry-run.test.ts`; 4 tests sobre fixture en temp dir
 - [ ] Indexación dinámica del codebase — inyectar archivos relevantes por tarea automáticamente
 - [ ] MCP server expose — para Claude Code / Cursor
 - [ ] Evals por agente — golden outputs, regression, benchmark
@@ -165,9 +172,9 @@ Production blockers que separan un proyecto interesante de uno usable por tercer
 
 ### Bloque 1 — Ship it (semanas 1-3)
 - Fase 7: CI/CD + npm publish + primera release `0.1.0`
-- Fase 6: Benchmark dataset + evals reproducibles (al menos smoke tests)
-- A.4: Timeouts por stage en providers API
-- B.6: Persistir budget history entre sesiones
+- Fase 6: Benchmark dataset + evals reproducibles (golden outputs por stage)
+- ~~A.4: Timeouts por stage en providers API~~ ✅
+- ~~B.6: Persistir budget history entre sesiones~~ ✅
 
 ### Bloque 2 — Confianza (semanas 4-6)
 - Fase 5: Sandboxing real (Docker o Firejail)

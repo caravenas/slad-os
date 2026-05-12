@@ -1,6 +1,6 @@
 import { readFile, writeFile, mkdir, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import type {
+import {
   EvolveOutput,
   ExploreOutput,
   LearnOutput,
@@ -10,20 +10,6 @@ import type {
   SnapshotOutput,
 } from "../core/types.js";
 import { ParseError } from "../core/errors.js";
-import { renderRun } from "./render/run.js";
-import { renderExplore } from "./render/explore.js";
-import { renderSnapshot } from "./render/snapshot.js";
-import { renderPlan } from "./render/plan.js";
-import { renderLearn } from "./render/learn.js";
-import { renderEvolve } from "./render/evolve.js";
-import { renderSession } from "./render/session.js";
-import { parseRun } from "./parse/run.js";
-import { parseExplore } from "./parse/explore.js";
-import { parseSnapshot } from "./parse/snapshot.js";
-import { parsePlan } from "./parse/plan.js";
-import { parseLearn } from "./parse/learn.js";
-import { parseEvolve } from "./parse/evolve.js";
-import { parseSession } from "./parse/session.js";
 import {
   artifactDir,
   pathForArtifact,
@@ -31,7 +17,6 @@ import {
   timestampedPathForArtifact,
   timestampedPathForRun,
 } from "./layout.js";
-import { parseFrontmatter } from "./frontmatter.js";
 
 // ─── Public types ─────────────────────────────────────────────────────────────
 
@@ -74,11 +59,23 @@ export interface ParseResult<T> {
   warnings: string[];
 }
 
+// ─── Zod schema map ───────────────────────────────────────────────────────────
+
+const SCHEMAS = {
+  explore: ExploreOutput,
+  snapshot: SnapshotOutput,
+  plan: PlanOutput,
+  run: RunOutput,
+  learn: LearnOutput,
+  evolve: EvolveOutput,
+  session: SessionState,
+} as const;
+
 // ─── writeArtifact ────────────────────────────────────────────────────────────
 
 /**
- * Renders value to Markdown+YAML, writes to disk, returns an ArtifactRef.
- * For "run": path is <docsRoot>/log/runs/{sessionId}_{taskId}.md
+ * Serializes value as a JSON envelope, writes to disk, returns an ArtifactRef.
+ * For "run": path is <docsRoot>/log/runs/{sessionId}_{taskId}.json
  * If that path already exists, uses a timestamped variant to preserve history.
  */
 export async function writeArtifact<K extends ArtifactKind>(
@@ -87,9 +84,17 @@ export async function writeArtifact<K extends ArtifactKind>(
   ctx: WriteContext,
 ): Promise<ArtifactRef<K>> {
   const createdAt = ctx.createdAt ?? new Date().toISOString();
-  const writeCtx: WriteContext = { ...ctx, createdAt };
+  const taskId = taskIdFor(kind, value);
 
-  const content = renderArtifact(kind, value, writeCtx);
+  const envelope = {
+    kind,
+    schemaVersion: 1,
+    sessionId: ctx.sessionId,
+    createdAt,
+    ...(taskId ? { taskId } : {}),
+    value,
+  };
+  const content = JSON.stringify(envelope, null, 2);
 
   const key = artifactKey(kind, value, ctx.key);
   const primary = kind === "run"
@@ -101,87 +106,17 @@ export async function writeArtifact<K extends ArtifactKind>(
       : await timestampedPathForArtifact(kind, ctx.sessionId, createdAt, key)
     : primary;
 
-  // Ensure parent dirs exist
   const dir = filePath.substring(0, filePath.lastIndexOf("/"));
   await mkdir(dir, { recursive: true });
-
   await writeFile(filePath, content, "utf8");
 
-  return {
-    kind,
-    path: filePath,
-    sessionId: ctx.sessionId,
-    ...(taskIdFor(kind, value) ? { taskId: taskIdFor(kind, value) } : {}),
-    createdAt,
-  };
-}
-
-function renderArtifact<K extends ArtifactKind>(
-  kind: K,
-  value: ArtifactByKind[K],
-  ctx: WriteContext,
-): string {
-  switch (kind) {
-    case "explore":
-      return renderExplore(value as ExploreOutput, ctx);
-    case "snapshot":
-      return renderSnapshot(value as SnapshotOutput, ctx);
-    case "plan":
-      return renderPlan(value as PlanOutput, ctx);
-    case "run":
-      return renderRun(value as RunOutput, ctx);
-    case "learn":
-      return renderLearn(value as LearnOutput, ctx);
-    case "evolve":
-      return renderEvolve(value as EvolveOutput, ctx);
-    case "session":
-      return renderSession(value as SessionState, ctx);
-  }
-}
-
-function parseArtifact<K extends ArtifactKind>(
-  kind: K,
-  text: string,
-  filePath: string,
-): ParseResult<ArtifactByKind[K]> {
-  switch (kind) {
-    case "explore":
-      return parseExplore(text, filePath) as ParseResult<ArtifactByKind[K]>;
-    case "snapshot":
-      return parseSnapshot(text, filePath) as ParseResult<ArtifactByKind[K]>;
-    case "plan":
-      return parsePlan(text, filePath) as ParseResult<ArtifactByKind[K]>;
-    case "run":
-      return parseRun(text, filePath) as ParseResult<ArtifactByKind[K]>;
-    case "learn":
-      return parseLearn(text, filePath) as ParseResult<ArtifactByKind[K]>;
-    case "evolve":
-      return parseEvolve(text, filePath) as ParseResult<ArtifactByKind[K]>;
-    case "session":
-      return parseSession(text, filePath) as ParseResult<ArtifactByKind[K]>;
-  }
-}
-
-function artifactKey<K extends ArtifactKind>(
-  kind: K,
-  value: ArtifactByKind[K],
-  explicit?: string,
-): string | undefined {
-  if (explicit) return explicit;
-  if (kind === "learn") return (value as LearnOutput).taskId;
-  return undefined;
-}
-
-function taskIdFor<K extends ArtifactKind>(kind: K, value: ArtifactByKind[K]): string | undefined {
-  if (kind === "run") return (value as RunOutput).taskId;
-  if (kind === "learn") return (value as LearnOutput).taskId;
-  return undefined;
+  return { kind, path: filePath, sessionId: ctx.sessionId, ...(taskId ? { taskId } : {}), createdAt };
 }
 
 // ─── readArtifact ─────────────────────────────────────────────────────────────
 
 /**
- * Reads a Markdown+YAML artifact from disk, parses and validates it.
+ * Reads a JSON artifact envelope from disk, parses and validates it.
  * Throws ParseError if the file is missing or fundamentally unreadable.
  */
 export async function readArtifact<K extends ArtifactKind>(
@@ -199,14 +134,35 @@ export async function readArtifact<K extends ArtifactKind>(
     });
   }
 
-  return parseArtifact(kind, text, filePath);
+  let envelope: Record<string, unknown>;
+  try {
+    envelope = JSON.parse(text);
+  } catch (err: any) {
+    throw new ParseError(`cannot parse JSON in artifact: ${filePath}`, {
+      path: filePath,
+      phase: "json",
+      cause: err,
+    });
+  }
+
+  const raw = (envelope.value ?? envelope) as unknown;
+  const schema = SCHEMAS[kind];
+  const result = schema.safeParse(raw);
+  if (!result.success) {
+    throw new ParseError(`artifact failed schema validation: ${filePath}`, {
+      path: filePath,
+      phase: "zod",
+      cause: result.error,
+    });
+  }
+
+  return { value: result.data as ArtifactByKind[K], warnings: [] };
 }
 
 // ─── listArtifacts ────────────────────────────────────────────────────────────
 
 /**
  * Lists artifact refs from disk for a given kind, optionally filtered by sessionId.
- * Reads minimal frontmatter metadata without full parse.
  */
 export async function listArtifacts<K extends ArtifactKind>(
   kind: K,
@@ -217,9 +173,8 @@ export async function listArtifacts<K extends ArtifactKind>(
   let files: string[];
   try {
     const entries = await readdir(dir);
-    files = entries.filter((f) => f.endsWith(".md")).map((f) => `${dir}/${f}`);
+    files = entries.filter((f) => f.endsWith(".json")).map((f) => `${dir}/${f}`);
   } catch {
-    // Directory doesn't exist yet — return empty list
     return [];
   }
 
@@ -228,18 +183,36 @@ export async function listArtifacts<K extends ArtifactKind>(
   for (const filePath of files) {
     try {
       const text = await readFile(filePath, "utf8");
-      const { frontmatter } = parseFrontmatter(text, filePath);
-      const sessionId = String(frontmatter.sessionId ?? "");
-      const taskId = typeof frontmatter.taskId === "string" ? frontmatter.taskId : undefined;
-      const createdAt = String(frontmatter.createdAt ?? "");
+      const envelope = JSON.parse(text) as Record<string, unknown>;
+      const sessionId = String(envelope.sessionId ?? "");
+      const taskId = typeof envelope.taskId === "string" ? envelope.taskId : undefined;
+      const createdAt = String(envelope.createdAt ?? "");
 
       if (filter?.sessionId && sessionId !== filter.sessionId) continue;
 
       refs.push({ kind, path: filePath, sessionId, taskId, createdAt });
     } catch {
-      // Skip unreadable files
+      // skip unreadable files
     }
   }
 
   return refs;
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function artifactKey<K extends ArtifactKind>(
+  kind: K,
+  value: ArtifactByKind[K],
+  explicit?: string,
+): string | undefined {
+  if (explicit) return explicit;
+  if (kind === "learn") return (value as LearnOutput).taskId;
+  return undefined;
+}
+
+function taskIdFor<K extends ArtifactKind>(kind: K, value: ArtifactByKind[K]): string | undefined {
+  if (kind === "run") return (value as RunOutput).taskId;
+  if (kind === "learn") return (value as LearnOutput).taskId;
+  return undefined;
 }

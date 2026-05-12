@@ -1,7 +1,9 @@
-import { describe, it, beforeEach } from "node:test";
+import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { renderRun } from "./render/run.js";
-import { parseRun } from "./parse/run.js";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { writeArtifact, readArtifact } from "./index.js";
 import { ParseError } from "../core/errors.js";
 import { resetDocsRootCache } from "./layout.js";
 import type { RunOutput } from "../core/types.js";
@@ -27,24 +29,36 @@ function makeRunOutput(overrides: Partial<RunOutput> = {}): RunOutput {
 }
 
 describe("persistence/run", () => {
+  let tmpDir: string;
+  let previousDocspath: string | undefined;
+
   beforeEach(() => {
     resetDocsRootCache();
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "slad-run-test-"));
+    previousDocspath = process.env.SLAD_DOCS_PATH;
+    process.env.SLAD_DOCS_PATH = path.join(tmpDir, "docs");
   });
 
-  // ── Test 1: Roundtrip happy-path ──────────────────────────────────────────
+  afterEach(() => {
+    resetDocsRootCache();
+    if (previousDocspath === undefined) {
+      delete process.env.SLAD_DOCS_PATH;
+    } else {
+      process.env.SLAD_DOCS_PATH = previousDocspath;
+    }
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
 
-  it("1. roundtrip happy-path: render → parse → deep-equal", () => {
+  it("1. roundtrip happy-path: writeArtifact → readArtifact → deep-equal", async () => {
     const original = makeRunOutput();
-    const rendered = renderRun(original, BASE_CTX);
-    const { value, warnings } = parseRun(rendered);
+    const ref = await writeArtifact("run", original, BASE_CTX);
+    const { value, warnings } = await readArtifact("run", ref.path);
 
     assert.deepEqual(value, original);
     assert.equal(warnings.length, 0);
   });
 
-  // ── Test 2: Roundtrip con campos opcionales vacíos ────────────────────────
-
-  it("2. roundtrip con campos opcionales vacíos", () => {
+  it("2. roundtrip con campos opcionales vacíos", async () => {
     const original = makeRunOutput({
       reviewerNotes: [],
       followUps: [],
@@ -53,82 +67,62 @@ describe("persistence/run", () => {
       changedFiles: [],
       verification: [],
     });
-    const rendered = renderRun(original, BASE_CTX);
-    const { value, warnings } = parseRun(rendered);
+    const ref = await writeArtifact("run", original, BASE_CTX);
+    const { value, warnings } = await readArtifact("run", ref.path);
 
     assert.deepEqual(value, original);
     assert.equal(warnings.length, 0);
   });
 
-  // ── Test 3: Tolerancia — body sin ## Summary ──────────────────────────────
-
-  it("3. tolerancia: body sin ## Summary → warning emitido, summary = ''", () => {
+  it("3. artifact path ends with .json", async () => {
     const original = makeRunOutput();
-    const rendered = renderRun(original, BASE_CTX);
-    // Strip the Summary section
-    const stripped = rendered.replace("## Summary\n" + original.summary + "\n", "");
-    const { value, warnings } = parseRun(stripped);
-
-    assert.equal(value.summary, "");
-    assert.ok(warnings.some((w) => w.includes("## Summary")));
+    const ref = await writeArtifact("run", original, BASE_CTX);
+    assert.ok(ref.path.endsWith(".json"), `Expected .json path, got: ${ref.path}`);
   });
 
-  // ── Test 4: Tolerancia — bullets con espacios extras ─────────────────────
-
-  it("4. tolerancia: bullets con espacios extras se parsean preservando espacios internos", () => {
-    const original = makeRunOutput({ reviewerNotes: [] });
-    const rendered = renderRun(original, BASE_CTX);
-    // Inject bullets with extra leading space after dash
-    const withExtraSpaces = rendered.replace(
-      "## Reviewer Notes\n",
-      "## Reviewer Notes\n-   item con   espacios\n",
-    );
-    const { value } = parseRun(withExtraSpaces);
-
-    assert.deepEqual(value.reviewerNotes, ["item con   espacios"]);
+  it("4. envelope tiene kind, schemaVersion, sessionId, value", async () => {
+    const original = makeRunOutput();
+    const ref = await writeArtifact("run", original, BASE_CTX);
+    const raw = JSON.parse(fs.readFileSync(ref.path, "utf8")) as Record<string, unknown>;
+    assert.equal(raw.kind, "run");
+    assert.equal(raw.schemaVersion, 1);
+    assert.equal(raw.sessionId, BASE_CTX.sessionId);
+    assert.deepEqual(raw.value, original);
   });
 
-  // ── Test 5: Falla — frontmatter ausente ──────────────────────────────────
-
-  it("5. falla: frontmatter ausente → ParseError con phase=yaml", () => {
-    const badText = "# Run T1\n\nSin frontmatter aquí.";
-    assert.throws(
-      () => parseRun(badText, "/fake/path.md"),
+  it("5. readArtifact falla con ParseError phase=filesystem si el archivo no existe", async () => {
+    await assert.rejects(
+      () => readArtifact("run", "/nonexistent/path/run.json"),
       (err: unknown) => {
         assert.ok(err instanceof ParseError);
-        assert.equal(err.phase, "yaml");
-        assert.equal(err.path, "/fake/path.md");
+        assert.equal(err.phase, "filesystem");
         return true;
       },
     );
   });
 
-  // ── Test 6: Falla — YAML malformado ──────────────────────────────────────
-
-  it("6. falla: YAML malformado → ParseError con phase=yaml", () => {
-    const badYaml = "---\nkind: run\n  bad: indent: broken:\n---\n\n# Run T1\n";
-    assert.throws(
-      () => parseRun(badYaml),
+  it("6. readArtifact falla con ParseError phase=json si JSON está malformado", async () => {
+    const badPath = path.join(tmpDir, "bad.json");
+    fs.writeFileSync(badPath, "{ not valid json", "utf8");
+    await assert.rejects(
+      () => readArtifact("run", badPath),
       (err: unknown) => {
         assert.ok(err instanceof ParseError);
-        assert.equal(err.phase, "yaml");
+        assert.equal(err.phase, "json");
         return true;
       },
     );
   });
 
-  // ── Test 7: Falla — status inválido → ParseError zod ─────────────────────
-
-  it("7. falla: status con valor inválido → ParseError con phase=zod", () => {
-    // Build a valid MD, then corrupt the status in frontmatter
-    const original = makeRunOutput();
-    const rendered = renderRun(original, BASE_CTX);
-    // The RunOutput.status transform maps unknown values to "not_run" (verification),
-    // but RunOutput.status is a strict enum: completed|blocked|failed|awaiting_human
-    // Replace "status: completed" with an invalid value
-    const corrupted = rendered.replace("status: completed", "status: invalid_value_xyz");
-    assert.throws(
-      () => parseRun(corrupted),
+  it("7. readArtifact falla con ParseError phase=zod si value no pasa schema", async () => {
+    const badPath = path.join(tmpDir, "bad-schema.json");
+    fs.writeFileSync(
+      badPath,
+      JSON.stringify({ kind: "run", schemaVersion: 1, sessionId: "s", value: { taskId: "T1", status: "invalid_xyz" } }),
+      "utf8",
+    );
+    await assert.rejects(
+      () => readArtifact("run", badPath),
       (err: unknown) => {
         assert.ok(err instanceof ParseError);
         assert.equal(err.phase, "zod");
@@ -137,23 +131,19 @@ describe("persistence/run", () => {
     );
   });
 
-  // ── Test 8: Render — verification vacío produce array en frontmatter ──────
-
-  it("8. render: verification: [] produce verification: [] en frontmatter (no omitido)", () => {
-    const original = makeRunOutput({ verification: [] });
-    const rendered = renderRun(original, BASE_CTX);
-
-    assert.ok(rendered.includes("verification: []"), `Expected 'verification: []' in:\n${rendered}`);
+  it("8. segunda escritura del mismo run genera path timestamped", async () => {
+    const original = makeRunOutput();
+    const ref1 = await writeArtifact("run", original, BASE_CTX);
+    const ref2 = await writeArtifact("run", original, BASE_CTX);
+    assert.notEqual(ref1.path, ref2.path);
+    assert.ok(ref2.path.includes("__"), `Expected timestamped path, got: ${ref2.path}`);
   });
 
-  // ── Test 9: Idempotencia del render ───────────────────────────────────────
-
-  it("9. idempotencia: render(parse(render(x))) === render(x)", () => {
+  it("9. idempotencia: readArtifact dos veces da el mismo value", async () => {
     const original = makeRunOutput();
-    const firstRender = renderRun(original, BASE_CTX);
-    const parsed = parseRun(firstRender).value;
-    const secondRender = renderRun(parsed, BASE_CTX);
-
-    assert.equal(secondRender, firstRender);
+    const ref = await writeArtifact("run", original, BASE_CTX);
+    const first = await readArtifact("run", ref.path);
+    const second = await readArtifact("run", ref.path);
+    assert.deepEqual(first.value, second.value);
   });
 });

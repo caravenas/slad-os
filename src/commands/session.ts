@@ -20,8 +20,7 @@ import { computePathHash, discoverCliCandidates } from "../models/cli-discovery.
 import type { DiscoveryResult as DiscoveryResultType } from "../core/types.js";
 import { createBootUi, type BootUiOptions } from "../cli/ui.js";
 import { artifactDirSync } from "../persistence/layout.js";
-import { stringifyYaml } from "../persistence/yaml.js";
-import { parseCliDiscoveryArtifact } from "../persistence/parse/session.js";
+import { DiscoveryResult } from "../core/types.js";
 
 type SessionStartDeps = {
   bootUiFactory?: (opts: BootUiOptions) => ReturnType<typeof createBootUi>;
@@ -65,34 +64,25 @@ function isStrictPathDiscoveryEnabled(): boolean {
 }
 
 function discoveryArtifactPath(sessionId: string): string {
-  return path.join(artifactDirSync("session"), `${sessionId}_cli-discovery.md`);
+  return path.join(artifactDirSync("session"), `${sessionId}_cli-discovery.json`);
 }
 
 function renderDiscoveryArtifact(
   sessionId: string,
   discovery: DiscoveryResultType,
 ): string {
-  const frontmatter = {
-    kind: "cli-discovery",
-    schemaVersion: 1,
-    sessionId,
-    createdAt: new Date().toISOString(),
-    discovery,
-  };
-  return [
-    "---",
-    stringifyYaml(frontmatter).trimEnd(),
-    "---",
-    "",
-    `# CLI Discovery ${sessionId}`,
-    "",
-  ].join("\n");
+  return JSON.stringify(
+    { kind: "cli-discovery", schemaVersion: 1, sessionId, createdAt: new Date().toISOString(), value: discovery },
+    null,
+    2,
+  );
 }
 
 function readDiscoveryArtifact(filePath: string): DiscoveryResultType | null {
   if (!fs.existsSync(filePath)) return null;
   try {
-    return parseCliDiscoveryArtifact(fs.readFileSync(filePath, "utf8"), filePath);
+    const envelope = JSON.parse(fs.readFileSync(filePath, "utf8")) as Record<string, unknown>;
+    return DiscoveryResult.parse(envelope.value ?? envelope);
   } catch {
     return null;
   }

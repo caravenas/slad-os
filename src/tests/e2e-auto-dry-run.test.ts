@@ -124,9 +124,9 @@ describe("E2E: slad auto --dry-run (mock provider)", () => {
     assert.ok(fs.existsSync(path.join(logDir, "plans")), "plans dir should exist");
 
     // At least one artifact per stage
-    const explores = fs.readdirSync(path.join(logDir, "explores")).filter((f) => f.endsWith(".md"));
-    const snapshots = fs.readdirSync(path.join(logDir, "snapshots")).filter((f) => f.endsWith(".md"));
-    const plans = fs.readdirSync(path.join(logDir, "plans")).filter((f) => f.endsWith(".md"));
+    const explores = fs.readdirSync(path.join(logDir, "explores")).filter((f) => f.endsWith(".json"));
+    const snapshots = fs.readdirSync(path.join(logDir, "snapshots")).filter((f) => f.endsWith(".json"));
+    const plans = fs.readdirSync(path.join(logDir, "plans")).filter((f) => f.endsWith(".json"));
 
     assert.ok(explores.length >= 1, `Expected ≥1 explore artifact, got ${explores.length}`);
     assert.ok(snapshots.length >= 1, `Expected ≥1 snapshot artifact, got ${snapshots.length}`);
@@ -147,12 +147,17 @@ describe("E2E: slad auto --dry-run (mock provider)", () => {
 
     const autoLogDir = path.join(fixtureDir, "docs", "log", "auto");
     assert.ok(fs.existsSync(autoLogDir), "auto log dir should exist");
-    const reports = fs.readdirSync(autoLogDir).filter((f) => f.endsWith(".md"));
+    const reports = fs.readdirSync(autoLogDir).filter((f) => f.endsWith(".json"));
     assert.ok(reports.length >= 1, "Expected at least one auto-report");
 
-    // The report contains 'status'
-    const reportContent = fs.readFileSync(path.join(autoLogDir, reports[0]!), "utf8");
-    assert.ok(reportContent.includes("completed") || reportContent.includes("partial") || reportContent.includes("failed"), "report should have a status");
+    // The report is a JSON envelope with auto-report value
+    const reportContent = JSON.parse(fs.readFileSync(path.join(autoLogDir, reports[0]!), "utf8")) as Record<string, unknown>;
+    assert.equal(reportContent.kind, "auto-report");
+    const value = reportContent.value as Record<string, unknown> | undefined;
+    assert.ok(
+      value?.status === "completed" || value?.status === "partial" || value?.status === "failed",
+      "report should have a valid status",
+    );
   });
 
   it("does not write run artifacts in dry-run mode", async () => {
@@ -169,7 +174,7 @@ describe("E2E: slad auto --dry-run (mock provider)", () => {
 
     const runsDir = path.join(fixtureDir, "docs", "log", "runs");
     if (fs.existsSync(runsDir)) {
-      const runs = fs.readdirSync(runsDir).filter((f) => f.endsWith(".md"));
+      const runs = fs.readdirSync(runsDir).filter((f) => f.endsWith(".json"));
       assert.equal(runs.length, 0, "dry-run should not produce run artifacts");
     }
     // runsDir not existing at all is also acceptable

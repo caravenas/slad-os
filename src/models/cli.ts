@@ -6,9 +6,8 @@ import type { ModelProvider } from "./index.js";
 import { getActiveSession } from "../core/session.js";
 import { parseCliDiscoveryAnswer } from "../core/config.js";
 import { log } from "../core/logger.js";
-import { type ChatMessage, type CompletionOptions, type DiscoveryResult as DiscoveryResultType, type ProviderName } from "../core/types.js";
+import { DiscoveryResult, type ChatMessage, type CompletionOptions, type DiscoveryResult as DiscoveryResultType, type ProviderName } from "../core/types.js";
 import { CliFallbackError, ProviderError } from "../core/errors.js";
-import { parseCliDiscoveryArtifact } from "../persistence/parse/session.js";
 
 const DEFAULT_TIMEOUT_MS = 1_800_000;
 const API_KEY_ENV_NAMES = [
@@ -526,7 +525,8 @@ export class CLIProvider implements ModelProvider {
       [...session.artifacts].reverse().find((entry) => entry.kind === "cli-discovery")?.path ?? null;
     if (!artifactPath || !fs.existsSync(artifactPath)) return null;
     try {
-      return parseCliDiscoveryArtifact(fs.readFileSync(artifactPath, "utf8"), artifactPath);
+      const envelope = JSON.parse(fs.readFileSync(artifactPath, "utf8")) as Record<string, unknown>;
+      return DiscoveryResult.parse(envelope.value ?? envelope);
     } catch {
       return null;
     }

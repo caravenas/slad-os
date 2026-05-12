@@ -10,9 +10,8 @@ import { projectContextBlock } from "../core/context.js";
 import { SchemaError } from "../core/errors.js";
 import { log } from "../core/logger.js";
 import { getProvider, type ModelProvider } from "../models/index.js";
-import { listArtifacts, writeArtifact } from "../persistence/index.js";
+import { listArtifacts, readArtifact, writeArtifact } from "../persistence/index.js";
 import { artifactDirSync, resetDocsRootCache } from "../persistence/layout.js";
-import { parseRun } from "../persistence/parse/run.js";
 import {
   getActiveSession,
   upsertArtifact,
@@ -138,11 +137,11 @@ function latestLegacyJsonFile(dir: string): string | null {
   return files[0] ?? null;
 }
 
-function latestMarkdownRunFile(dir: string): string | null {
+function latestJsonRunFile(dir: string): string | null {
   if (!fs.existsSync(dir)) return null;
   const files = fs
     .readdirSync(dir)
-    .filter((file) => file.endsWith(".md"))
+    .filter((file) => file.endsWith(".json") && !/-auto\.json$/.test(file) && !/-auto-report\.json$/.test(file))
     .map((file) => path.join(dir, file))
     .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
   return files[0] ?? null;
@@ -152,11 +151,11 @@ async function latestRunFile(dir: string, cwd = process.cwd()): Promise<string |
   const legacy = latestLegacyJsonFile(dir);
   if (legacy) return legacy;
 
-  const localMarkdown = latestMarkdownRunFile(dir);
-  if (localMarkdown) return localMarkdown;
+  const localJson = latestJsonRunFile(dir);
+  if (localJson) return localJson;
 
-  const cwdMarkdown = latestMarkdownRunFile(artifactDirSync("run", cwd));
-  if (cwdMarkdown) return cwdMarkdown;
+  const cwdJson = latestJsonRunFile(artifactDirSync("run", cwd));
+  if (cwdJson) return cwdJson;
 
   const refs = await listArtifacts("run");
   return refs
@@ -190,13 +189,8 @@ async function readRun(
     throw new Error("No existe un run report. Usa --input <run.md|run.json> o corre `slad run` primero.");
   }
 
-  if (runPath.endsWith(".md")) {
-    const parsed = parseRun(fs.readFileSync(runPath, "utf8"), runPath);
-    return { source: runPath, content: parsed.value };
-  }
-
-  const raw = JSON.parse(fs.readFileSync(runPath, "utf8"));
-  return { source: runPath, content: RunOutput.parse(raw) };
+  const { value } = await readArtifact("run", runPath);
+  return { source: runPath, content: value };
 }
 
 async function readSessionRuns(
@@ -235,7 +229,7 @@ function removePreviousLearnArtifacts(session: SessionState, taskId: string, cwd
       .filter((artifact) => artifact.kind === "learn")
       .map((artifact) => resolveArtifactPath(artifact.path, cwd)),
   );
-  paths.add(path.join(artifactDirSync("learn", cwd), `${session.id}_${taskId}.md`));
+  paths.add(path.join(artifactDirSync("learn", cwd), `${session.id}_${taskId}.json`));
 
   for (const filePath of paths) {
     if (fs.existsSync(filePath) && fs.statSync(filePath).isFile()) {
